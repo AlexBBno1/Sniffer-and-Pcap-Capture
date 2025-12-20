@@ -209,8 +209,88 @@ def test_connection():
 # Store last error for debugging
 last_connection_error = None
 
+# Time sync status
+time_sync_status = {
+    "last_sync": None,
+    "offset_seconds": None,
+    "success": False
+}
 
-def start_capture_thread(band):
+
+def sync_openwrt_time():
+    """Sync OpenWrt system time with local PC time"""
+    global time_sync_status
+    
+    try:
+        # Get current PC time in the format OpenWrt expects
+        pc_time = datetime.now()
+        
+        # Format for OpenWrt date command: "YYYY-MM-DD HH:MM:SS"
+        time_str = pc_time.strftime("%Y-%m-%d %H:%M:%S")
+        
+        # First, get OpenWrt's current time to calculate offset
+        success, stdout, stderr = run_ssh_command("date '+%Y-%m-%d %H:%M:%S'", timeout=10)
+        
+        openwrt_time_before = None
+        if success and stdout.strip():
+            try:
+                openwrt_time_before = datetime.strptime(stdout.strip(), "%Y-%m-%d %H:%M:%S")
+                offset = (pc_time - openwrt_time_before).total_seconds()
+                time_sync_status["offset_seconds"] = offset
+                print(f"[TIME SYNC] OpenWrt time before sync: {stdout.strip()}")
+                print(f"[TIME SYNC] PC time: {time_str}")
+                print(f"[TIME SYNC] Offset: {offset:.1f} seconds")
+            except Exception as e:
+                print(f"[TIME SYNC] Could not parse OpenWrt time: {e}")
+        
+        # Set the time on OpenWrt
+        # Using date -s for BusyBox compatibility
+        set_cmd = f'date -s "{time_str}"'
+        success, stdout, stderr = run_ssh_command(set_cmd, timeout=10)
+        
+        if success:
+            # Verify the time was set correctly
+            success, stdout, stderr = run_ssh_command("date '+%Y-%m-%d %H:%M:%S'", timeout=10)
+            print(f"[TIME SYNC] OpenWrt time after sync: {stdout.strip()}")
+            
+            time_sync_status["last_sync"] = pc_time
+            time_sync_status["success"] = True
+            
+            return True, f"Time synced: {time_str}"
+        else:
+            time_sync_status["success"] = False
+            return False, f"Failed to set time: {stderr}"
+            
+    except Exception as e:
+        time_sync_status["success"] = False
+        return False, f"Time sync error: {str(e)}"
+
+
+def get_time_info():
+    """Get current time info from both PC and OpenWrt"""
+    pc_time = datetime.now()
+    
+    success, stdout, stderr = run_ssh_command("date '+%Y-%m-%d %H:%M:%S'", timeout=10)
+    
+    openwrt_time = None
+    offset = None
+    
+    if success and stdout.strip():
+        try:
+            openwrt_time = datetime.strptime(stdout.strip(), "%Y-%m-%d %H:%M:%S")
+            offset = (pc_time - openwrt_time).total_seconds()
+        except:
+            pass
+    
+    return {
+        "pc_time": pc_time.strftime("%Y-%m-%d %H:%M:%S"),
+        "openwrt_time": stdout.strip() if success else "Unknown",
+        "offset_seconds": offset,
+        "synced": abs(offset) < 2 if offset is not None else False
+    }
+
+
+def start_capture_thread(band, auto_sync_time=True):
     """Start packet capture for specified band"""
     global capture_status
     
@@ -222,6 +302,20 @@ def start_capture_thread(band):
         return False, f"{band} capture already running"
     
     try:
+        # Auto-sync time before starting capture (only for first band if starting multiple)
+        if auto_sync_time:
+            # Check if any other band is already capturing - if so, time was already synced
+            other_bands_running = any(
+                capture_status[b]["running"] for b in ["2G", "5G", "6G"] if b != band
+            )
+            if not other_bands_running:
+                print(f"[CAPTURE] Syncing time before starting {band} capture...")
+                sync_success, sync_msg = sync_openwrt_time()
+                if sync_success:
+                    print(f"[CAPTURE] Time sync successful: {sync_msg}")
+                else:
+                    print(f"[CAPTURE] Time sync warning: {sync_msg} (continuing anyway)")
+        
         # Remote file path
         remote_path = f"/tmp/{band}.pcap"
         
@@ -914,6 +1008,16 @@ HTML_TEMPLATE = """
                 <div class="status-dot {{ 'connected' if connected else 'disconnected' }}" id="connectionDot"></div>
                 <span id="connectionText">{{ '192.168.1.1 Connected' if connected else '192.168.1.1 Disconnected - Click to diagnose' }}</span>
             </div>
+            
+            <!-- Time Sync Status -->
+            <div class="time-sync-status" id="timeSyncStatus" style="margin-top: 0.75rem; display: inline-flex; align-items: center; gap: 0.5rem; padding: 0.5rem 1rem; background: var(--bg-card); border-radius: 2rem; border: 1px solid var(--border-color); font-size: 0.85rem;">
+                <span style="color: var(--text-secondary);">🕐 PC:</span>
+                <span id="pcTime" style="font-family: 'JetBrains Mono', monospace;">--:--:--</span>
+                <span style="color: var(--text-secondary);">| OpenWrt:</span>
+                <span id="openwrtTime" style="font-family: 'JetBrains Mono', monospace;">--:--:--</span>
+                <span id="timeOffsetBadge" style="padding: 0.2rem 0.5rem; border-radius: 1rem; font-size: 0.75rem; font-weight: 600;">--</span>
+                <button onclick="manualSyncTime()" style="background: none; border: 1px solid var(--border-color); color: var(--text-secondary); padding: 0.25rem 0.5rem; border-radius: 0.25rem; cursor: pointer; font-size: 0.75rem;" title="Sync OpenWrt time with PC">🔄 Sync</button>
+            </div>
             {% if not connected %}
             <div style="margin-top: 1rem; padding: 1rem; background: rgba(239, 68, 68, 0.1); border: 1px solid #ef4444; border-radius: 0.5rem; max-width: 600px; margin-left: auto; margin-right: auto;">
                 <p style="color: #ef4444; margin-bottom: 0.5rem; font-weight: 600;">⚠️ SSH Connection Failed</p>
@@ -1399,6 +1503,65 @@ HTML_TEMPLATE = """
             location.reload();
         }
         
+        // Update time display
+        async function updateTimeDisplay() {
+            try {
+                const response = await fetch('/api/time_info');
+                const data = await response.json();
+                
+                document.getElementById('pcTime').textContent = data.pc_time ? data.pc_time.split(' ')[1] : '--:--:--';
+                document.getElementById('openwrtTime').textContent = data.openwrt_time ? data.openwrt_time.split(' ')[1] : '--:--:--';
+                
+                const badge = document.getElementById('timeOffsetBadge');
+                if (data.offset_seconds !== null) {
+                    const absOffset = Math.abs(data.offset_seconds);
+                    if (absOffset < 2) {
+                        badge.textContent = '✓ Synced';
+                        badge.style.background = 'rgba(34, 197, 94, 0.2)';
+                        badge.style.color = 'var(--accent-2g)';
+                    } else if (absOffset < 60) {
+                        badge.textContent = `${data.offset_seconds > 0 ? '+' : ''}${data.offset_seconds.toFixed(0)}s`;
+                        badge.style.background = 'rgba(245, 158, 11, 0.2)';
+                        badge.style.color = 'var(--accent-warning)';
+                    } else {
+                        const minutes = Math.round(absOffset / 60);
+                        badge.textContent = `${data.offset_seconds > 0 ? '+' : '-'}${minutes}m`;
+                        badge.style.background = 'rgba(239, 68, 68, 0.2)';
+                        badge.style.color = 'var(--accent-danger)';
+                    }
+                } else {
+                    badge.textContent = '?';
+                    badge.style.background = 'rgba(148, 163, 184, 0.2)';
+                    badge.style.color = 'var(--text-secondary)';
+                }
+            } catch (e) {
+                console.error('Failed to update time display:', e);
+            }
+        }
+        
+        // Manual sync time
+        async function manualSyncTime() {
+            setLoading(true);
+            try {
+                const response = await fetch('/api/sync_time', { method: 'POST' });
+                const data = await response.json();
+                
+                if (data.success) {
+                    showNotification('Time synchronized successfully!', 'success');
+                    updateTimeDisplay();
+                } else {
+                    showNotification('Time sync failed: ' + data.message, 'error');
+                }
+            } catch (e) {
+                showNotification('Time sync error: ' + e.message, 'error');
+            }
+            setLoading(false);
+        }
+        
+        // Update time display periodically
+        updateTimeDisplay();
+        setInterval(updateTimeDisplay, 5000);
+        
         // Diagnose connection
         async function diagnoseConnection() {
             setLoading(true);
@@ -1619,6 +1782,26 @@ def api_diagnose():
     results["error"] = last_connection_error
     
     return jsonify(results)
+
+
+@app.route('/api/time_info')
+def api_time_info():
+    """Get time information from PC and OpenWrt"""
+    info = get_time_info()
+    info["last_sync"] = time_sync_status["last_sync"].strftime("%Y-%m-%d %H:%M:%S") if time_sync_status["last_sync"] else None
+    return jsonify(info)
+
+
+@app.route('/api/sync_time', methods=['POST'])
+def api_sync_time():
+    """Manually sync OpenWrt time with PC time"""
+    success, message = sync_openwrt_time()
+    info = get_time_info()
+    return jsonify({
+        "success": success,
+        "message": message,
+        "time_info": info
+    })
 
 
 if __name__ == '__main__':
