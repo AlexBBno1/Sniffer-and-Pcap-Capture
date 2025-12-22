@@ -106,6 +106,35 @@ python wifi_sniffer_web_control.py
 
 ---
 
+## 🔌 Port 配置（多專案同時運行）
+
+本專案預設使用 **Port 5000**。若需與其他專案同時運行，可透過環境變數修改 Port。
+
+### 修改方式
+
+**方法一：編輯 `start_server.bat`**
+```batch
+:: 找到這行，修改 Port 號碼
+set FLASK_PORT=5000
+```
+
+**方法二：手動執行時設定環境變數**
+```powershell
+$env:FLASK_PORT=5002
+python wifi_sniffer_web_control.py
+```
+
+### 專案 Port 對照表
+
+| 專案 | 預設 Port | 網址 |
+|------|-----------|------|
+| WiFi Sniffer Control Panel | `5000` | http://127.0.0.1:5000 |
+| WiFi PCAP Analyzer | `5001` | http://127.0.0.1:5001 |
+
+> **提示**：若 EXE 檔案也需要使用不同 Port，需設定環境變數後執行，或重新編譯 EXE。
+
+---
+
 ## 📁 File Structure
 
 ```
@@ -355,6 +384,13 @@ If you encounter issues, please collect:
 ---
 
 ## 🔄 Changelog
+
+### v1.5 (2024-12-22)
+- **Added**: Environment variable port configuration (`FLASK_PORT`)
+  - Allows running multiple Flask projects simultaneously
+  - Default port: 5000
+  - Configurable via `start_server.bat` or environment variable
+- **Updated**: All batch files support port configuration
 
 ### v1.4 (2024-12-19)
 - **Added**: Auto-detect current WiFi channel configuration on page load

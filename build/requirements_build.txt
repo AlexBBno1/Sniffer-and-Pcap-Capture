@@ -1,0 +1,15 @@
+# Build Dependencies for WiFi Sniffer Control Panel
+# Install with: pip install -r requirements_build.txt
+
+# Core application dependencies
+flask>=2.3.0
+paramiko>=3.0.0
+
+# System tray support
+pystray>=0.19.0
+pillow>=10.0.0
+
+# Build tools
+pyinstaller>=6.0.0
+
+
