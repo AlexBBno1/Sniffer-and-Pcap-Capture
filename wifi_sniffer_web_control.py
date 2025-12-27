@@ -338,13 +338,19 @@ def get_band_from_channel(channel):
 _SSH_PUBKEY_ACCEPT_OPTION = None  # "PubkeyAcceptedAlgorithms" | "PubkeyAcceptedKeyTypes" | None
 
 
-def _ssh_creationflags():
-    """Hide console window on Windows when spawning ssh."""
+def _get_subprocess_startupinfo():
+    """Get startupinfo to hide console window on Windows (without breaking SSH)."""
     import subprocess
     import sys
-    if sys.platform == "win32" and hasattr(subprocess, "CREATE_NO_WINDOW"):
-        return subprocess.CREATE_NO_WINDOW
-    return 0
+    
+    if sys.platform == "win32":
+        # Use STARTUPINFO to hide window instead of CREATE_NO_WINDOW
+        # This works better with SSH authentication
+        startupinfo = subprocess.STARTUPINFO()
+        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        startupinfo.wShowWindow = 0  # SW_HIDE
+        return startupinfo
+    return None
 
 
 def _ssh_null_device_path():
@@ -365,7 +371,7 @@ def _detect_pubkey_accept_option():
 
     import subprocess
 
-    creationflags = _ssh_creationflags()
+    startupinfo = _get_subprocess_startupinfo()
     for opt in ("PubkeyAcceptedAlgorithms", "PubkeyAcceptedKeyTypes"):
         try:
             # -G prints final configuration without connecting; it fails fast for bad options.
@@ -374,7 +380,7 @@ def _detect_pubkey_accept_option():
                 capture_output=True,
                 text=True,
                 timeout=5,
-                creationflags=creationflags,
+                startupinfo=startupinfo,
             )
             if probe.returncode == 0:
                 _SSH_PUBKEY_ACCEPT_OPTION = opt
@@ -450,13 +456,17 @@ def _run_ssh_command_system_no_batch(command, timeout=30):
 
     # Build command without BatchMode for better compatibility
     ssh_cmd = _build_ssh_base_cmd(timeout=timeout, batch_mode=False, include_pubkey_accept=True) + [command]
-
+    
+    # Get startupinfo to hide console window
+    startupinfo = _get_subprocess_startupinfo()
+    
     try:
         result = subprocess.run(
             ssh_cmd,
             capture_output=True,
             text=True,
-            timeout=timeout + 5,  # Give a bit more time than SSH's ConnectTimeout
+            timeout=timeout + 5,
+            startupinfo=startupinfo,
         )
         
         if result.returncode == 0:
@@ -478,19 +488,19 @@ def _run_ssh_background_system(command):
     """Start SSH command in background using system ssh"""
     import subprocess
 
-    # Use batch_mode=False for better compatibility with Dropbear (no password)
+    # Use batch_mode=False for better compatibility with Dropbear
     ssh_cmd = _build_ssh_base_cmd(timeout=10, batch_mode=False, include_pubkey_accept=True) + [command]
 
-    # Hide console window on Windows
-    creationflags = _ssh_creationflags()
-
+    # Get startupinfo to hide console window
+    startupinfo = _get_subprocess_startupinfo()
+    
     try:
         process = subprocess.Popen(
             ssh_cmd,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            stdin=subprocess.DEVNULL,  # Prevent stdin blocking
-            creationflags=creationflags
+            stdin=subprocess.DEVNULL,
+            startupinfo=startupinfo,
         )
         return process
     except Exception as e:
@@ -508,16 +518,15 @@ def _download_file_system(remote_path, local_path):
     import subprocess
 
     # Use SSH + cat to pipe binary file content
-    # Use batch_mode=False for better compatibility with Dropbear (no password)
     ssh_cmd = _build_ssh_base_cmd(timeout=10, batch_mode=False, include_pubkey_accept=True) + [f"cat {remote_path}"]
 
-    # Hide console window on Windows
-    creationflags = _ssh_creationflags()
+    # Get startupinfo to hide console window
+    startupinfo = _get_subprocess_startupinfo()
 
     try:
         print(f"[DOWNLOAD] Downloading {remote_path} to {local_path}")
         with open(local_path, 'wb') as f:
-            result = subprocess.run(ssh_cmd, stdout=f, stderr=subprocess.PIPE, stdin=subprocess.DEVNULL, timeout=120, creationflags=creationflags)
+            result = subprocess.run(ssh_cmd, stdout=f, stderr=subprocess.PIPE, stdin=subprocess.DEVNULL, timeout=120, startupinfo=startupinfo)
         
         if result.returncode == 0 and os.path.exists(local_path):
             size = os.path.getsize(local_path)
@@ -2466,8 +2475,8 @@ def api_diagnose():
         "solution": None
     }
     
-    # Hide console window on Windows
-    creationflags = subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
+    # Get startupinfo to hide console window
+    startupinfo = _get_subprocess_startupinfo()
     
     # Test ping
     try:
@@ -2475,7 +2484,7 @@ def api_diagnose():
             ["ping", "-n", "1", "-w", "2000", OPENWRT_HOST],
             capture_output=True,
             timeout=5,
-            creationflags=creationflags
+            startupinfo=startupinfo
         )
         results["ping_test"] = ping_result.returncode == 0
     except Exception as e:
