@@ -412,26 +412,23 @@ def _find_ssh_executable():
 
 
 def _build_ssh_base_cmd(timeout=None, batch_mode=True, include_pubkey_accept=True):
-    """Build a robust ssh command line for connecting to OpenWrt/Dropbear."""
+    """Build SSH command line for connecting to OpenWrt/Dropbear."""
     # Find SSH executable
     ssh_exe = _find_ssh_executable()
-    print(f"[SSH DEBUG] Using SSH executable: {ssh_exe}")
     
-    # Use minimal options that are known to work with Dropbear
+    # Use minimal options that work best with Dropbear
     ssh_cmd = [
         ssh_exe,
         "-o", "StrictHostKeyChecking=no",
         "-o", "HostKeyAlgorithms=+ssh-rsa",
     ]
 
-    # Only add timeout if specified
     if timeout is not None:
         ssh_cmd += ["-o", f"ConnectTimeout={timeout}"]
 
     if batch_mode:
         ssh_cmd += ["-o", "BatchMode=yes"]
 
-    # Respect configured port (only add if non-default)
     if SSH_PORT != 22:
         ssh_cmd += ["-p", str(SSH_PORT)]
     
@@ -443,67 +440,18 @@ def _build_ssh_base_cmd(timeout=None, batch_mode=True, include_pubkey_accept=Tru
 
 
 def run_ssh_command(command, timeout=30):
-    """Run SSH command - tries system ssh first, falls back to paramiko if needed"""
-    
-    # For empty password or no password: try system ssh first (works better with Dropbear)
-    # For actual password: try paramiko first, then system ssh
-    
-    if OPENWRT_PASSWORD is None or OPENWRT_PASSWORD == "":
-        # No password or empty password: use system ssh (better Dropbear compatibility)
-        # Try without BatchMode first (allows empty password auth)
-        success, stdout, stderr = _run_ssh_command_system_no_batch(command, timeout)
-        if success:
-            return success, stdout, stderr
-        # Fallback to BatchMode (for SSH key auth)
-        return _run_ssh_command_system(command, timeout)
-    else:
-        # Has password: try paramiko first
-        success, stdout, stderr = _run_ssh_command_paramiko(command, timeout)
-        if success:
-            return success, stdout, stderr
-        # Fallback to system ssh (in case paramiko fails with Dropbear)
-        return _run_ssh_command_system_no_batch(command, timeout)
-
-
-def _run_ssh_command_paramiko(command, timeout=30):
-    """Run SSH command using paramiko (supports password authentication)"""
-    try:
-        client = paramiko.SSHClient()
-        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-        
-        client.connect(
-            hostname=OPENWRT_HOST,
-            port=SSH_PORT,
-            username=OPENWRT_USER,
-            password=OPENWRT_PASSWORD,
-            timeout=timeout,
-            allow_agent=True,
-            look_for_keys=True,
-        )
-        
-        stdin, stdout, stderr = client.exec_command(command, timeout=timeout)
-        out = stdout.read().decode('utf-8', errors='replace')
-        err = stderr.read().decode('utf-8', errors='replace')
-        exit_code = stdout.channel.recv_exit_status()
-        
-        client.close()
-        return exit_code == 0, out, err
-    except Exception as e:
-        return False, "", str(e)
+    """Run SSH command using system ssh (best compatibility with OpenWrt/Dropbear)"""
+    return _run_ssh_command_system_no_batch(command, timeout)
 
 
 def _run_ssh_command_system_no_batch(command, timeout=30):
-    """Run SSH command using system ssh WITHOUT BatchMode (allows empty auth)"""
+    """Run SSH command using system ssh (best compatibility with OpenWrt/Dropbear)"""
     import subprocess
 
-    # Build command without BatchMode - this allows authentication without SSH key
+    # Build command without BatchMode for better compatibility
     ssh_cmd = _build_ssh_base_cmd(timeout=timeout, batch_mode=False, include_pubkey_accept=True) + [command]
-    
-    # Debug output
-    print(f"[SSH DEBUG] Executing command: {' '.join(ssh_cmd)}")
 
     try:
-        # Don't hide console window - this might be causing issues
         result = subprocess.run(
             ssh_cmd,
             capture_output=True,
@@ -511,62 +459,10 @@ def _run_ssh_command_system_no_batch(command, timeout=30):
             timeout=timeout + 5,  # Give a bit more time than SSH's ConnectTimeout
         )
         
-        print(f"[SSH DEBUG] Return code: {result.returncode}")
-        print(f"[SSH DEBUG] stdout: {result.stdout[:200] if result.stdout else '(empty)'}")
-        print(f"[SSH DEBUG] stderr: {result.stderr[:200] if result.stderr else '(empty)'}")
-        
         if result.returncode == 0:
             return True, result.stdout, result.stderr
 
         return False, result.stdout, result.stderr
-    except subprocess.TimeoutExpired:
-        print(f"[SSH DEBUG] Timeout expired after {timeout+5} seconds")
-        return False, "", "Command timeout"
-    except Exception as e:
-        print(f"[SSH DEBUG] Exception: {e}")
-        return False, "", str(e)
-
-
-def _run_ssh_command_system(command, timeout=30):
-    """Run SSH command using system ssh with BatchMode (for SSH key authentication)"""
-    import subprocess
-
-    # Hide console window on Windows
-    creationflags = _ssh_creationflags()
-
-    # Try with detected pubkey option first; if local OpenSSH doesn't support it, retry without it.
-    attempts = [
-        _build_ssh_base_cmd(timeout=timeout, batch_mode=True, include_pubkey_accept=True),
-        _build_ssh_base_cmd(timeout=timeout, batch_mode=True, include_pubkey_accept=False),
-    ]
-
-    try:
-        last_result = None
-        for base_cmd in attempts:
-            ssh_cmd = base_cmd + [command]
-            result = subprocess.run(
-                ssh_cmd,
-                capture_output=True,
-                text=True,
-                timeout=timeout,
-                creationflags=creationflags,
-            )
-            last_result = result
-            if result.returncode == 0:
-                return True, result.stdout, result.stderr
-
-            # If the pubkey option was rejected at runtime, clear cache and retry without it.
-            err = (result.stderr or "").lower()
-            if "bad configuration option" in err and (
-                "pubkeyacceptedalgorithms" in err or "pubkeyacceptedkeytypes" in err
-            ):
-                global _SSH_PUBKEY_ACCEPT_OPTION
-                _SSH_PUBKEY_ACCEPT_OPTION = None
-                continue
-
-        if last_result is None:
-            return False, "", "SSH command failed (no attempts executed)"
-        return False, last_result.stdout, last_result.stderr
     except subprocess.TimeoutExpired:
         return False, "", "Command timeout"
     except Exception as e:
@@ -574,67 +470,8 @@ def _run_ssh_command_system(command, timeout=30):
 
 
 def run_ssh_command_background(command):
-    """Start SSH command in background, return process or paramiko channel"""
-    
-    # For no password/empty password: use system ssh (better Dropbear compatibility)
-    if OPENWRT_PASSWORD is None or OPENWRT_PASSWORD == "":
-        return _run_ssh_background_system(command)
-    
-    # Has password: try paramiko, fallback to system ssh
-    result = _run_ssh_background_paramiko(command)
-    if result is not None:
-        return result
+    """Start SSH command in background using system ssh"""
     return _run_ssh_background_system(command)
-
-
-def _run_ssh_background_paramiko(command):
-    """Start SSH command in background using paramiko"""
-    try:
-        client = paramiko.SSHClient()
-        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-        
-        client.connect(
-            hostname=OPENWRT_HOST,
-            port=SSH_PORT,
-            username=OPENWRT_USER,
-            password=OPENWRT_PASSWORD,
-            timeout=15,
-            allow_agent=True,
-            look_for_keys=True,
-        )
-        
-        # Execute command without waiting for completion
-        stdin, stdout, stderr = client.exec_command(command)
-        
-        # Return a wrapper object that mimics subprocess behavior
-        class ParamikoProcess:
-            def __init__(self, client, stdout, stderr):
-                self._client = client
-                self.stdout = stdout
-                self.stderr = stderr
-                self._terminated = False
-            
-            def poll(self):
-                if self._terminated:
-                    return 0
-                if self.stdout.channel.exit_status_ready():
-                    return self.stdout.channel.recv_exit_status()
-                return None
-            
-            def terminate(self):
-                self._terminated = True
-                try:
-                    self._client.close()
-                except:
-                    pass
-            
-            def kill(self):
-                self.terminate()
-        
-        return ParamikoProcess(client, stdout, stderr)
-    except Exception as e:
-        print(f"[SSH] Failed to start command via paramiko: {e}")
-        return None
 
 
 def _run_ssh_background_system(command):
@@ -662,57 +499,8 @@ def _run_ssh_background_system(command):
 
 
 def download_file_scp(remote_path, local_path):
-    """Download file using SSH - prefers system ssh for better Dropbear compatibility"""
-    
-    # For no password/empty password: use system ssh (better Dropbear compatibility)
-    if OPENWRT_PASSWORD is None or OPENWRT_PASSWORD == "":
-        return _download_file_system(remote_path, local_path)
-    
-    # Has password: try paramiko, fallback to system ssh
-    result = _download_file_paramiko(remote_path, local_path)
-    if result:
-        return result
+    """Download file using system ssh (best compatibility with OpenWrt/Dropbear)"""
     return _download_file_system(remote_path, local_path)
-
-
-def _download_file_paramiko(remote_path, local_path):
-    """Download file using paramiko (supports password authentication)"""
-    try:
-        print(f"[DOWNLOAD] Downloading {remote_path} to {local_path} via paramiko")
-        
-        client = paramiko.SSHClient()
-        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-        
-        client.connect(
-            hostname=OPENWRT_HOST,
-            port=SSH_PORT,
-            username=OPENWRT_USER,
-            password=OPENWRT_PASSWORD,
-            timeout=15,
-            allow_agent=True,
-            look_for_keys=True,
-        )
-        
-        # Use exec_command with cat (OpenWrt doesn't have sftp-server)
-        stdin, stdout, stderr = client.exec_command(f"cat {remote_path}", timeout=120)
-        
-        with open(local_path, 'wb') as f:
-            while True:
-                data = stdout.read(65536)  # Read in 64KB chunks
-                if not data:
-                    break
-                f.write(data)
-        
-        client.close()
-        
-        if os.path.exists(local_path):
-            size = os.path.getsize(local_path)
-            print(f"[DOWNLOAD] Success: {size} bytes")
-            return size > 0
-        return False
-    except Exception as e:
-        print(f"[DOWNLOAD] Error: {e}")
-        return False
 
 
 def _download_file_system(remote_path, local_path):
@@ -1662,20 +1450,10 @@ HTML_TEMPLATE = """
             </div>
             {% if not connected %}
             <div style="margin-top: 1rem; padding: 1rem; background: rgba(239, 68, 68, 0.1); border: 1px solid #ef4444; border-radius: 0.5rem; max-width: 600px; margin-left: auto; margin-right: auto;">
-                <p style="color: #ef4444; margin-bottom: 0.75rem; font-weight: 600;">⚠️ SSH Connection Failed</p>
-                <p style="color: var(--text-secondary); font-size: 0.85rem; margin-bottom: 0.75rem;">
-                    Enter your OpenWrt password below, or leave empty if your router has no password set.
-                </p>
-                <div style="display: flex; gap: 0.75rem; flex-wrap: wrap; align-items: center;">
-                    <input type="password" id="quickPasswordInput" placeholder="Password (leave empty if none)" 
-                        style="flex: 1; min-width: 200px; padding: 0.5rem 0.75rem; background: var(--bg-dark); border: 1px solid var(--border-color); border-radius: 0.35rem; color: var(--text-primary);"
-                        onkeypress="if(event.key==='Enter') quickSetPassword()">
-                    <button onclick="quickSetPassword()" style="padding: 0.5rem 1rem; background: linear-gradient(135deg, var(--accent-2g), var(--accent-5g)); border: none; border-radius: 0.35rem; color: white; font-weight: 600; cursor: pointer; white-space: nowrap;">
-                        🔑 Connect
-                    </button>
-                </div>
-                <p style="color: var(--text-secondary); font-size: 0.75rem; margin-top: 0.5rem; margin-bottom: 0;">
-                    💡 Tip: If your OpenWrt uses default settings (no password), just click Connect directly.
+                <p style="color: #ef4444; margin-bottom: 0.5rem; font-weight: 600;">⚠️ SSH Connection Failed</p>
+                <p style="color: var(--text-secondary); font-size: 0.85rem; margin-bottom: 0;">
+                    Please check: OpenWrt router is on, IP is 192.168.1.1, and SSH is enabled.<br>
+                    Click on "Disconnected" above for detailed diagnosis.
                 </p>
             </div>
             {% endif %}
@@ -2442,20 +2220,11 @@ HTML_TEMPLATE = """
                 
                 // Add solution section if needed
                 let solutionHtml = '';
-                if (!data.ssh_test && data.solution) {
+                if (!data.ssh_test && data.solution_text) {
                     solutionHtml = `
-                        <div style="background: rgba(234, 179, 8, 0.1); border: 1px solid #eab308; border-radius: 0.5rem; padding: 1rem; margin-bottom: 1rem;">
+                        <div style="background: rgba(234, 179, 8, 0.1); border: 1px solid #eab308; border-radius: 0.5rem; padding: 1rem;">
                             <div style="font-weight: 600; color: #eab308; margin-bottom: 0.5rem;">💡 Solution</div>
                             <div style="color: var(--text-secondary); font-size: 0.9rem;">${data.solution_text}</div>
-                        </div>
-                        <div style="margin-bottom: 1rem;">
-                            <label style="display: block; margin-bottom: 0.5rem; font-weight: 500;">Enter OpenWrt Password:</label>
-                            <input type="password" id="diagnosePasswordInput" placeholder="Leave empty if no password" 
-                                style="width: 100%; padding: 0.75rem; background: var(--bg-dark); border: 1px solid var(--border-color); border-radius: 0.5rem; color: var(--text-primary); font-size: 1rem;"
-                                onkeypress="if(event.key==='Enter') setPasswordFromDiagnose()">
-                            <div style="margin-top: 0.5rem; font-size: 0.8rem; color: var(--text-secondary);">
-                                💡 If your OpenWrt has no password (default), just click Connect directly.
-                            </div>
                         </div>
                     `;
                 }
@@ -2486,18 +2255,11 @@ HTML_TEMPLATE = """
                     ${statusHtml}
                     ${solutionHtml}
                     <div style="display: flex; gap: 0.75rem; justify-content: flex-end; margin-top: 1rem;">
-                        ${!isConnected && solutionHtml ? '<button onclick="setPasswordFromDiagnose()" style="padding: 0.75rem 1.5rem; background: linear-gradient(135deg, var(--accent-2g), var(--accent-5g)); border: none; border-radius: 0.5rem; color: white; font-weight: 600; cursor: pointer;">Connect</button>' : ''}
-                        <button onclick="closeDiagnoseModal()" style="padding: 0.75rem 1.5rem; background: var(--bg-dark); border: 1px solid var(--border-color); border-radius: 0.5rem; color: var(--text-primary); cursor: pointer;">${isConnected ? 'OK' : 'Cancel'}</button>
+                        <button onclick="closeDiagnoseModal()" style="padding: 0.75rem 1.5rem; background: var(--bg-dark); border: 1px solid var(--border-color); border-radius: 0.5rem; color: var(--text-primary); cursor: pointer;">OK</button>
                     </div>
                 </div>
             `;
             document.body.appendChild(modal);
-            
-            // Focus password input if exists
-            setTimeout(() => {
-                const pwInput = document.getElementById('diagnosePasswordInput');
-                if (pwInput) pwInput.focus();
-            }, 100);
         }
         
         function closeDiagnoseModal() {
@@ -2505,62 +2267,6 @@ HTML_TEMPLATE = """
             if (modal) modal.remove();
         }
         
-        async function setPasswordFromDiagnose() {
-            const input = document.getElementById('diagnosePasswordInput');
-            const password = input ? input.value : '';
-            
-            setLoading(true);
-            try {
-                const response = await fetch('/api/set_password', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ password: password, allow_empty: true })
-                });
-                const data = await response.json();
-                
-                if (data.success && data.connected) {
-                    closeDiagnoseModal();
-                    showNotification(data.message, 'success');
-                    // Update connection status
-                    document.getElementById('connectionDot').className = 'status-dot connected';
-                    document.getElementById('connectionText').textContent = '192.168.1.1 Connected';
-                    // Reload page to update all states
-                    setTimeout(() => location.reload(), 1000);
-                } else {
-                    showNotification(data.message, 'error');
-                }
-            } catch (e) {
-                showNotification('Failed to set password: ' + e.message, 'error');
-            }
-            setLoading(false);
-        }
-        
-        // Quick set password from header input (empty password allowed for OpenWrt without password)
-        async function quickSetPassword() {
-            const input = document.getElementById('quickPasswordInput');
-            const password = input ? input.value : '';
-            
-            setLoading(true);
-            try {
-                const response = await fetch('/api/set_password', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ password: password, allow_empty: true })
-                });
-                const data = await response.json();
-                
-                if (data.success && data.connected) {
-                    showNotification(data.message, 'success');
-                    // Reload page to update all states
-                    setTimeout(() => location.reload(), 1000);
-                } else {
-                    showNotification(data.message || 'Connection failed. Please check password.', 'error');
-                }
-            } catch (e) {
-                showNotification('Failed to connect: ' + e.message, 'error');
-            }
-            setLoading(false);
-        }
         
         // Auto-refresh every 5 seconds if any capture is running
         {% if status['2G']['running'] or status['5G']['running'] or status['6G']['running'] %}
@@ -2782,54 +2488,12 @@ def api_diagnose():
     # Provide specific solution based on diagnosis
     if not results["ping_test"]:
         results["solution"] = "network"
-        results["solution_text"] = "Cannot reach OpenWrt router. Check network connection and ensure router IP is 192.168.1.1"
+        results["solution_text"] = "Cannot reach OpenWrt router. Check: 1) Router is powered on, 2) PC is connected to router network, 3) Router IP is 192.168.1.1"
     elif not results["ssh_test"]:
-        if results["has_ssh_key"]:
-            results["solution"] = "key_not_authorized"
-            results["solution_text"] = f"SSH key found ({', '.join(ssh_keys_found)}) but not authorized on OpenWrt. Either add your public key to the router or set a password below."
-        else:
-            results["solution"] = "no_auth"
-            results["solution_text"] = "No SSH key found and no password set. Please enter your OpenWrt root password below."
+        results["solution"] = "ssh_failed"
+        results["solution_text"] = "SSH connection failed. Check: 1) SSH/Dropbear is enabled on OpenWrt, 2) Try: ssh root@192.168.1.1 in terminal"
     
     return jsonify(results)
-
-
-@app.route('/api/set_password', methods=['POST'])
-def api_set_password():
-    """Set OpenWrt password at runtime (no restart required)"""
-    global OPENWRT_PASSWORD
-    
-    data = request.get_json()
-    password = data.get('password', '')
-    allow_empty = data.get('allow_empty', False)
-    
-    # Set password (even if empty - for OpenWrt without password)
-    # Use empty string "" to indicate "use paramiko with no password"
-    # Use None to indicate "use system ssh with SSH key"
-    if allow_empty or password:
-        OPENWRT_PASSWORD = password  # Can be empty string ""
-        # Test connection with new password
-        connected = test_connection()
-        if connected:
-            msg = "Connected successfully!" if password else "Connected successfully (no password)!"
-            return jsonify({
-                "success": True,
-                "message": msg,
-                "connected": True
-            })
-        else:
-            return jsonify({
-                "success": False,
-                "message": f"Connection failed: {last_connection_error}",
-                "connected": False
-            })
-    else:
-        OPENWRT_PASSWORD = None
-        return jsonify({
-            "success": True,
-            "message": "Password cleared (using SSH key authentication)",
-            "connected": test_connection()
-        })
 
 
 @app.route('/api/time_info')
