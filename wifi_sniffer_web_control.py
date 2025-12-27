@@ -419,7 +419,45 @@ def _build_ssh_base_cmd(timeout=None, batch_mode=True, include_pubkey_accept=Tru
 
 
 def run_ssh_command(command, timeout=30):
-    """Run SSH command using system ssh (supports legacy OpenWrt/Dropbear)"""
+    """Run SSH command - uses paramiko when password is set, system ssh otherwise"""
+    
+    # If password is set, use paramiko (supports password auth)
+    if OPENWRT_PASSWORD:
+        return _run_ssh_command_paramiko(command, timeout)
+    
+    # Otherwise use system ssh (for SSH key auth)
+    return _run_ssh_command_system(command, timeout)
+
+
+def _run_ssh_command_paramiko(command, timeout=30):
+    """Run SSH command using paramiko (supports password authentication)"""
+    try:
+        client = paramiko.SSHClient()
+        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        
+        client.connect(
+            hostname=OPENWRT_HOST,
+            port=SSH_PORT,
+            username=OPENWRT_USER,
+            password=OPENWRT_PASSWORD,
+            timeout=timeout,
+            allow_agent=True,
+            look_for_keys=True,
+        )
+        
+        stdin, stdout, stderr = client.exec_command(command, timeout=timeout)
+        out = stdout.read().decode('utf-8', errors='replace')
+        err = stderr.read().decode('utf-8', errors='replace')
+        exit_code = stdout.channel.recv_exit_status()
+        
+        client.close()
+        return exit_code == 0, out, err
+    except Exception as e:
+        return False, "", str(e)
+
+
+def _run_ssh_command_system(command, timeout=30):
+    """Run SSH command using system ssh (for SSH key authentication)"""
     import subprocess
 
     # Hide console window on Windows
@@ -465,7 +503,68 @@ def run_ssh_command(command, timeout=30):
 
 
 def run_ssh_command_background(command):
-    """Start SSH command in background, return process"""
+    """Start SSH command in background, return process or paramiko channel"""
+    
+    # If password is set, use paramiko
+    if OPENWRT_PASSWORD:
+        return _run_ssh_background_paramiko(command)
+    
+    # Otherwise use system ssh
+    return _run_ssh_background_system(command)
+
+
+def _run_ssh_background_paramiko(command):
+    """Start SSH command in background using paramiko"""
+    try:
+        client = paramiko.SSHClient()
+        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        
+        client.connect(
+            hostname=OPENWRT_HOST,
+            port=SSH_PORT,
+            username=OPENWRT_USER,
+            password=OPENWRT_PASSWORD,
+            timeout=15,
+            allow_agent=True,
+            look_for_keys=True,
+        )
+        
+        # Execute command without waiting for completion
+        stdin, stdout, stderr = client.exec_command(command)
+        
+        # Return a wrapper object that mimics subprocess behavior
+        class ParamikoProcess:
+            def __init__(self, client, stdout, stderr):
+                self._client = client
+                self.stdout = stdout
+                self.stderr = stderr
+                self._terminated = False
+            
+            def poll(self):
+                if self._terminated:
+                    return 0
+                if self.stdout.channel.exit_status_ready():
+                    return self.stdout.channel.recv_exit_status()
+                return None
+            
+            def terminate(self):
+                self._terminated = True
+                try:
+                    self._client.close()
+                except:
+                    pass
+            
+            def kill(self):
+                self.terminate()
+        
+        return ParamikoProcess(client, stdout, stderr)
+    except Exception as e:
+        print(f"[SSH] Failed to start command via paramiko: {e}")
+        return None
+
+
+def _run_ssh_background_system(command):
+    """Start SSH command in background using system ssh"""
     import subprocess
 
     ssh_cmd = _build_ssh_base_cmd(timeout=10, batch_mode=True, include_pubkey_accept=True) + [command]
@@ -487,7 +586,58 @@ def run_ssh_command_background(command):
 
 
 def download_file_scp(remote_path, local_path):
-    """Download file using SSH cat pipe (OpenWrt doesn't have sftp-server)"""
+    """Download file using SSH - uses paramiko when password is set"""
+    
+    # If password is set, use paramiko SFTP
+    if OPENWRT_PASSWORD:
+        return _download_file_paramiko(remote_path, local_path)
+    
+    # Otherwise use system ssh cat pipe
+    return _download_file_system(remote_path, local_path)
+
+
+def _download_file_paramiko(remote_path, local_path):
+    """Download file using paramiko (supports password authentication)"""
+    try:
+        print(f"[DOWNLOAD] Downloading {remote_path} to {local_path} via paramiko")
+        
+        client = paramiko.SSHClient()
+        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        
+        client.connect(
+            hostname=OPENWRT_HOST,
+            port=SSH_PORT,
+            username=OPENWRT_USER,
+            password=OPENWRT_PASSWORD,
+            timeout=15,
+            allow_agent=True,
+            look_for_keys=True,
+        )
+        
+        # Use exec_command with cat (OpenWrt doesn't have sftp-server)
+        stdin, stdout, stderr = client.exec_command(f"cat {remote_path}", timeout=120)
+        
+        with open(local_path, 'wb') as f:
+            while True:
+                data = stdout.read(65536)  # Read in 64KB chunks
+                if not data:
+                    break
+                f.write(data)
+        
+        client.close()
+        
+        if os.path.exists(local_path):
+            size = os.path.getsize(local_path)
+            print(f"[DOWNLOAD] Success: {size} bytes")
+            return size > 0
+        return False
+    except Exception as e:
+        print(f"[DOWNLOAD] Error: {e}")
+        return False
+
+
+def _download_file_system(remote_path, local_path):
+    """Download file using system ssh cat pipe (for SSH key authentication)"""
     import subprocess
 
     # Use SSH + cat to pipe binary file content (like original batch files)
