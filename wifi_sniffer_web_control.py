@@ -386,17 +386,45 @@ def _detect_pubkey_accept_option():
     return None
 
 
+def _find_ssh_executable():
+    """Find the ssh executable path on Windows."""
+    import shutil
+    
+    # Try to find ssh in PATH first
+    ssh_path = shutil.which("ssh")
+    if ssh_path:
+        return ssh_path
+    
+    # Common Windows SSH locations
+    possible_paths = [
+        r"C:\Windows\System32\OpenSSH\ssh.exe",
+        r"C:\Program Files\OpenSSH\ssh.exe",
+        r"C:\Program Files (x86)\OpenSSH\ssh.exe",
+        r"C:\Users\{}\AppData\Local\Microsoft\WindowsApps\ssh.exe".format(os.environ.get("USERNAME", "")),
+    ]
+    
+    for path in possible_paths:
+        if os.path.exists(path):
+            return path
+    
+    # Fallback to just "ssh" and hope it's in PATH
+    return "ssh"
+
+
 def _build_ssh_base_cmd(timeout=None, batch_mode=True, include_pubkey_accept=True):
     """Build a robust ssh command line for connecting to OpenWrt/Dropbear."""
+    # Find SSH executable
+    ssh_exe = _find_ssh_executable()
+    print(f"[SSH DEBUG] Using SSH executable: {ssh_exe}")
+    
     # Use minimal options that are known to work with Dropbear
-    # Based on successful manual test: ssh -o StrictHostKeyChecking=no -o HostKeyAlgorithms=+ssh-rsa root@192.168.1.1
     ssh_cmd = [
-        "ssh",
+        ssh_exe,
         "-o", "StrictHostKeyChecking=no",
         "-o", "HostKeyAlgorithms=+ssh-rsa",
     ]
 
-    # Only add timeout if specified (some older SSH versions may have issues)
+    # Only add timeout if specified
     if timeout is not None:
         ssh_cmd += ["-o", f"ConnectTimeout={timeout}"]
 
@@ -468,46 +496,34 @@ def _run_ssh_command_system_no_batch(command, timeout=30):
     """Run SSH command using system ssh WITHOUT BatchMode (allows empty auth)"""
     import subprocess
 
-    # Hide console window on Windows
-    creationflags = _ssh_creationflags()
-
     # Build command without BatchMode - this allows authentication without SSH key
     ssh_cmd = _build_ssh_base_cmd(timeout=timeout, batch_mode=False, include_pubkey_accept=True) + [command]
+    
+    # Debug output
+    print(f"[SSH DEBUG] Executing command: {' '.join(ssh_cmd)}")
 
     try:
-        # Don't send any input - let SSH handle authentication naturally
+        # Don't hide console window - this might be causing issues
         result = subprocess.run(
             ssh_cmd,
             capture_output=True,
             text=True,
-            timeout=timeout,
-            creationflags=creationflags,
-            stdin=subprocess.DEVNULL,  # Prevent stdin blocking
+            timeout=timeout + 5,  # Give a bit more time than SSH's ConnectTimeout
         )
+        
+        print(f"[SSH DEBUG] Return code: {result.returncode}")
+        print(f"[SSH DEBUG] stdout: {result.stdout[:200] if result.stdout else '(empty)'}")
+        print(f"[SSH DEBUG] stderr: {result.stderr[:200] if result.stderr else '(empty)'}")
+        
         if result.returncode == 0:
             return True, result.stdout, result.stderr
 
-        # Check for bad config option and retry without pubkey accept
-        err = (result.stderr or "").lower()
-        if "bad configuration option" in err:
-            global _SSH_PUBKEY_ACCEPT_OPTION
-            _SSH_PUBKEY_ACCEPT_OPTION = None
-            ssh_cmd = _build_ssh_base_cmd(timeout=timeout, batch_mode=False, include_pubkey_accept=False) + [command]
-            result = subprocess.run(
-                ssh_cmd,
-                capture_output=True,
-                text=True,
-                timeout=timeout,
-                creationflags=creationflags,
-                stdin=subprocess.DEVNULL,
-            )
-            if result.returncode == 0:
-                return True, result.stdout, result.stderr
-
         return False, result.stdout, result.stderr
     except subprocess.TimeoutExpired:
+        print(f"[SSH DEBUG] Timeout expired after {timeout+5} seconds")
         return False, "", "Command timeout"
     except Exception as e:
+        print(f"[SSH DEBUG] Exception: {e}")
         return False, "", str(e)
 
 
