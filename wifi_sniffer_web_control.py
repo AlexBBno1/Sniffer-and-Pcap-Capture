@@ -469,24 +469,24 @@ def _run_ssh_command_paramiko(command, timeout=30):
 
 
 def _run_ssh_command_system_no_batch(command, timeout=30):
-    """Run SSH command using system ssh WITHOUT BatchMode (allows password prompts/empty auth)"""
+    """Run SSH command using system ssh WITHOUT BatchMode (allows empty auth)"""
     import subprocess
 
     # Hide console window on Windows
     creationflags = _ssh_creationflags()
 
-    # Build command without BatchMode - this allows empty password authentication
+    # Build command without BatchMode - this allows authentication without SSH key
     ssh_cmd = _build_ssh_base_cmd(timeout=timeout, batch_mode=False, include_pubkey_accept=True) + [command]
 
     try:
-        # Use stdin to send empty password if needed
+        # Don't send any input - let SSH handle authentication naturally
         result = subprocess.run(
             ssh_cmd,
             capture_output=True,
             text=True,
             timeout=timeout,
             creationflags=creationflags,
-            input="\n",  # Send newline for empty password prompt
+            stdin=subprocess.DEVNULL,  # Prevent stdin blocking
         )
         if result.returncode == 0:
             return True, result.stdout, result.stderr
@@ -503,7 +503,7 @@ def _run_ssh_command_system_no_batch(command, timeout=30):
                 text=True,
                 timeout=timeout,
                 creationflags=creationflags,
-                input="\n",
+                stdin=subprocess.DEVNULL,
             )
             if result.returncode == 0:
                 return True, result.stdout, result.stderr
