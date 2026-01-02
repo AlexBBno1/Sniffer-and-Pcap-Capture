@@ -2,7 +2,7 @@
 
 Web-based control panel for WiFi packet capture using OpenWrt Monitor Mode. Supports simultaneous or individual capture of 2.4G / 5G / 6G bands.
 
-**Version:** 1.9 | **Last Updated:** 2024-12-27
+**Version:** 2.1 | **Last Updated:** 2026-01-02
 
 ---
 
@@ -15,11 +15,30 @@ For deploying on a new computer, follow these steps:
 | 1 | Install Python 3.8+ (check "Add to PATH") | `python --version` |
 | 2 | Connect PC to OpenWrt network | Ping 192.168.1.1 |
 | 3 | Double-click `install.bat` | All [OK] messages |
-| 4 | Double-click `start_server.bat` | Browser opens |
+| 4 | Double-click `start_server_v2.bat` | Browser opens |
 | 5 | Check header shows 🟢 Connected | Green dot |
 | 6 | Check time shows ✓ Synced | Green badge |
 
-> **v1.9:** Simplified! Just run `start_server.bat` - no configuration needed. Works automatically with Windows native SSH.
+> **v2.0:** Major performance improvements! SSH connection pooling, WebSocket real-time updates, and async page loading for faster response on Windows 10/11.
+
+---
+
+## 🆕 What's New in v2.0
+
+| Feature | v1 (Classic) | v2 (Performance) |
+|---------|--------------|------------------|
+| Page Load | 3-5 seconds | < 500ms |
+| SSH Commands | New connection each time | Connection pooling |
+| Status Updates | 5 sec polling | WebSocket (instant) |
+| Interface Detection | 5-10 seconds | 2-3 seconds (cached) |
+| Architecture | Single file (2600 lines) | Modular (10+ files) |
+
+### v2 Performance Features
+- **SSH Connection Pool** - Reuses connections, caches SSH executable path
+- **WebSocket Real-time Updates** - No more polling, instant status changes
+- **Caching Layer** - Connection status, interface mapping cached
+- **Async Page Load** - Page renders immediately, data loads in background
+- **Modular Architecture** - Easier to maintain and extend
 
 ---
 
@@ -57,7 +76,9 @@ For deploying on a new computer, follow these steps:
 Double-click **`install.bat`**, the script will automatically:
 1. Check if Python is installed
 2. Install and upgrade pip to latest version
-3. Install required Python packages (Flask, Paramiko)
+3. Install required Python packages:
+   - Flask, Paramiko (core)
+   - Flask-SocketIO, Eventlet (v2 WebSocket support)
 4. Check if Wireshark is installed
 5. Provide SSH connection test
 
@@ -77,31 +98,45 @@ The system uses Windows native SSH which works automatically with OpenWrt's defa
 
 If your OpenWrt requires a password, you can either:
 1. **Set up SSH key authentication** (recommended)
-2. **Edit the config file**: Set `OPENWRT_PASSWORD = "your_password"` in `wifi_sniffer_web_control.py` (line ~26)
+2. **Edit the config file**: Set `OPENWRT_PASSWORD = "your_password"` in `wifi_sniffer/config.py`
 
 ---
 
 ## 🚀 Quick Start
 
-### Method 1: One-Click Launch (Recommended)
+### Method 1: v2 One-Click Launch (Recommended)
 
-Double-click **`start_server.bat`**, the script will:
+Double-click **`start_server_v2.bat`**, the script will:
 1. Automatically check Python environment
 2. Install required dependencies
-3. Start web server
+3. Start web server with WebSocket support
 4. Automatically open browser (http://127.0.0.1:5000)
 
-### Method 2: Manual Launch
+### Method 2: v1 Classic Launch
+
+Double-click **`start_server.bat`** for the classic v1 experience.
+
+### Method 3: Standalone EXE (No Python Required)
+
+| Version | File | Size |
+|---------|------|------|
+| v1 | `build\dist\WiFi_Sniffer_Control_Panel.exe` | 24.7 MB |
+| **v2** | `build\dist\WiFi_Sniffer_Control_Panel_v2.exe` | **26.4 MB** |
+
+Just double-click the EXE file - no Python installation needed!
+
+### Method 4: Manual Launch
 
 ```powershell
-# 1. Navigate to project directory (where you copied the folder)
+# 1. Navigate to project directory
 cd "path\to\Sniffer and Pcap Capture"
 
 # 2. Install dependencies (first time only)
 pip install -r requirements.txt
 
-# 3. Start server
-python wifi_sniffer_web_control.py
+# 3. Start server (choose one)
+python wifi_sniffer_web_control_v2.py   # v2 (recommended)
+python wifi_sniffer_web_control.py      # v1 (classic)
 
 # 4. Open browser
 # http://127.0.0.1:5000
@@ -115,7 +150,7 @@ python wifi_sniffer_web_control.py
 
 ### 修改方式
 
-**方法一：編輯 `start_server.bat`**
+**方法一：編輯 `start_server_v2.bat`**
 ```batch
 :: 找到這行，修改 Port 號碼
 set FLASK_PORT=5000
@@ -124,7 +159,7 @@ set FLASK_PORT=5000
 **方法二：手動執行時設定環境變數**
 ```powershell
 $env:FLASK_PORT=5002
-python wifi_sniffer_web_control.py
+python wifi_sniffer_web_control_v2.py
 ```
 
 ### 專案 Port 對照表
@@ -142,12 +177,37 @@ python wifi_sniffer_web_control.py
 
 ```
 Sniffer and Pcap Capture/
-├── wifi_sniffer_web_control.py   # Main application (Flask Web Control)
-├── requirements.txt               # Python dependencies list
-├── install.bat                    # First-time installation script
-├── setup_ssh.bat                  # SSH connection setup tool
-├── start_server.bat               # One-click launch script
-└── README.md                      # This documentation
+├── wifi_sniffer/                      # v2 Modular Package
+│   ├── __init__.py                    # Flask app factory
+│   ├── config.py                      # Centralized configuration
+│   ├── cache.py                       # Caching layer
+│   ├── ssh/
+│   │   ├── connection.py              # SSH connection pool
+│   │   └── commands.py                # SSH command helpers
+│   ├── capture/
+│   │   └── manager.py                 # Capture state management
+│   ├── routes/
+│   │   ├── api.py                     # REST API endpoints
+│   │   └── views.py                   # Page routes
+│   └── static/
+│       ├── css/style.css              # Extracted CSS (cacheable)
+│       └── js/app.js                  # Extracted JS (WebSocket)
+├── templates/
+│   └── index.html                     # HTML template
+├── wifi_sniffer_web_control_v2.py     # v2 entry point
+├── wifi_sniffer_web_control.py        # v1 classic (single file)
+├── requirements.txt                   # Python dependencies
+├── install.bat                        # One-click installation
+├── start_server_v2.bat                # v2 launcher
+├── start_server.bat                   # v1 launcher
+├── setup_ssh.bat                      # SSH connection setup
+├── build/
+│   ├── dist/
+│   │   ├── WiFi_Sniffer_Control_Panel_v2.exe
+│   │   └── WiFi_Sniffer_Control_Panel.exe
+│   ├── build_v2.bat                   # Build v2 EXE
+│   └── build.bat                      # Build v1 EXE
+└── README.md                          # This documentation
 ```
 
 ---
@@ -158,7 +218,7 @@ Sniffer and Pcap Capture/
 
 #### 1. Start the Server
 ```
-Double-click: start_server.bat
+Double-click: start_server_v2.bat
 ```
 - Wait for terminal to show "Running on http://127.0.0.1:5000"
 - Browser will open automatically
@@ -176,7 +236,7 @@ Double-click: start_server.bat
 
 - Status badge changes from `IDLE` to `CAPTURING`
 - Duration timer starts counting
-- Packet count updates every 3 seconds
+- Packet count updates in real-time (WebSocket in v2)
 
 #### 4. Stop and Download
 
@@ -205,13 +265,13 @@ Open the downloaded .pcap files with Wireshark for analysis
 | 5G | ath2 | RFLab5g | 5 GHz (CH 36-165) |
 | 6G | ath1 | RFLab6g | 6 GHz (CH 1-233) |
 
-### 🔄 Auto-Detection (NEW in v1.7)
+### 🔄 Auto-Detection
 
 **Problem:** Different hardware units may have different interface mappings:
 - **Unit A:** 5G=ath2, 6G=ath1 (default)
 - **Unit B:** 5G=ath1, 6G=ath2 (swapped)
 
-**Solution:** The system now **automatically detects** the correct interface mapping when connecting to OpenWrt.
+**Solution:** The system **automatically detects** the correct interface mapping when connecting to OpenWrt.
 
 **How it works:**
 1. On connection, the system queries `iwconfig` to read interface frequencies
@@ -220,6 +280,7 @@ Open the downloaded .pcap files with Wireshark for analysis
    - Frequency 3-6 GHz → 5G
    - Frequency > 6 GHz → 6G
 3. UCI radio mapping (wifi0/wifi1/wifi2) is also auto-detected
+4. **v2**: Results are cached for 5 minutes for faster subsequent loads
 
 **Web UI Indicators:**
 - Header shows: `🔗 Interface: 2G=ath0 | 5G=ath2 | 6G=ath1`
@@ -271,9 +332,9 @@ Open the downloaded .pcap files with Wireshark for analysis
    uci set wireless.wifi1.channel=37
    uci set wireless.wifi1.htmode=EHT320
    
-   # Commit changes and restart WiFi
+   # Commit changes and reload WiFi
    uci commit wireless
-   wifi
+   wifi load
    ```
 
 5. **Wait for interfaces to come back up** (~15-30 seconds)
@@ -301,6 +362,44 @@ Open the downloaded .pcap files with Wireshark for analysis
 3. **tcpdump** runs on OpenWrt to capture packets to `/tmp/{band}.pcap`
 4. **File Download** uses SSH pipe (`ssh cat /tmp/file > local_file`) since OpenWrt lacks sftp-server
 5. **Auto-cleanup** removes remote pcap files after successful download
+
+### v2 Architecture (Performance)
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                     Frontend (Browser)                       │
+│  ┌──────────┐  ┌──────────┐  ┌──────────────────────────┐  │
+│  │Static CSS│  │Static JS │  │  WebSocket Client        │  │
+│  │(Cached)  │  │(Cached)  │  │  (Real-time updates)     │  │
+│  └──────────┘  └──────────┘  └──────────────────────────┘  │
+└─────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────┐
+│                     Backend (Flask)                          │
+│  ┌──────────┐  ┌──────────┐  ┌──────────────────────────┐  │
+│  │Blueprints│  │Cache     │  │  WebSocket Server        │  │
+│  │(Routes)  │  │Layer     │  │  (Flask-SocketIO)        │  │
+│  └──────────┘  └──────────┘  └──────────────────────────┘  │
+└─────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────┐
+│                    SSH Layer                                 │
+│  ┌──────────────────────────────────────────────────────┐  │
+│  │  Connection Pool (Singleton)                          │  │
+│  │  - Cached SSH executable path                         │  │
+│  │  - Thread-safe command execution                      │  │
+│  │  - Reusable connections                               │  │
+│  └──────────────────────────────────────────────────────┘  │
+└─────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────┐
+│                    OpenWrt Router                            │
+│                    192.168.1.1                               │
+└─────────────────────────────────────────────────────────────┘
+```
 
 ### SSH Connection Details
 
@@ -379,18 +478,13 @@ Pcap files contain timestamps generated by the OpenWrt router. If the router's s
 ## ❓ Troubleshooting
 
 ### Q: Shows "Disconnected" - Cannot connect?
-**A:** The web interface will show a password input box. Try these steps:
+**A:** Try these steps:
 
-1. **Enter password in web UI** (easiest)
-   - Look for the red "SSH Connection Failed" box
-   - Enter your OpenWrt root password
-   - Click **🔑 Connect**
-
-2. **Click on "Disconnected" for detailed diagnosis**
+1. **Click on "Disconnected" for detailed diagnosis**
    - Shows: Ping test, SSH key detection, specific error message
    - Provides targeted solution based on diagnosis
 
-3. **Manual verification:**
+2. **Manual verification:**
    - OpenWrt router is powered on with IP 192.168.1.1
    - Your computer is connected to OpenWrt network
    - SSH service is enabled on OpenWrt
@@ -436,6 +530,13 @@ ssh-keygen -R 192.168.1.1
 - Manually click 🔄 Sync in header anytime
 - Consider setting up NTP on OpenWrt for persistent time
 
+### Q: v2 WebSocket not working?
+**A:** Check if Flask-SocketIO is installed:
+```powershell
+pip install flask-socketio eventlet
+```
+If WebSocket fails, the app automatically falls back to polling mode.
+
 ---
 
 ## 📊 Output Example
@@ -475,6 +576,36 @@ If you encounter issues, please collect:
 
 ## 🔄 Changelog
 
+### v2.1 (2026-01-02)
+- **Fixed**: Channel configuration now properly applies to OpenWrt
+  - Changed WiFi reload command from `wifi` to `wifi load` for correct channel application
+  - Fixed both v1 and v2 versions
+- **Fixed**: Auto-read current channel/bandwidth from OpenWrt on startup
+  - Program now detects and displays actual channel settings for all three bands
+  - UI dropdowns automatically sync with OpenWrt configuration
+- **Improved**: UCI detection includes htmode (bandwidth) in addition to channel
+- **Improved**: Frontend auto-adds missing channel/bandwidth options if not in dropdown
+
+### v2.0 (2026-01-02)
+- **NEW**: Complete architecture refactor for performance
+  - Modular package structure (`wifi_sniffer/`)
+  - SSH connection pooling (cached executable path, reusable connections)
+  - Caching layer for connection status and interface mapping
+  - Async page loading (no blocking on SSH test)
+- **NEW**: WebSocket real-time updates via Flask-SocketIO
+  - Instant status updates (no more 5-second polling)
+  - Automatic fallback to polling if WebSocket unavailable
+- **NEW**: Separate static files for browser caching
+  - CSS and JS extracted from Python code
+  - Faster page loads on repeat visits
+- **NEW**: Standalone EXE v2 with all performance improvements
+  - `build\dist\WiFi_Sniffer_Control_Panel_v2.exe`
+  - System tray support with status monitoring
+- **IMPROVED**: Windows 10 Pro performance significantly improved
+  - Page load: 3-5s → <500ms
+  - SSH commands: 1-3s → 200-500ms (pooled)
+- **UPDATED**: install.bat now installs all v2 dependencies
+
 ### v1.9 (2024-12-27)
 - **Fixed**: Root cause of SSH connection issues on Windows 10 21H2
   - Removed `CREATE_NO_WINDOW` flag that was blocking SSH authentication
@@ -493,83 +624,45 @@ If you encounter issues, please collect:
 
 ### v1.8 (2024-12-27)
 - **Added**: Web-based password input for easier setup on new computers
-  - No need to edit configuration files anymore
-  - Password input box appears automatically when connection fails
-  - Click "🔑 Connect" to authenticate instantly
-  - Password is used for current session only (not saved to disk)
 - **Added**: Enhanced connection diagnostics
-  - SSH key detection (checks for id_rsa, id_ed25519, etc.)
-  - Specific error messages with targeted solutions
-  - Click "Disconnected" status for detailed diagnosis modal
 - **Added**: Dual-track SSH authentication
-  - Uses **Paramiko** when password is set (supports password auth)
-  - Uses **System SSH** when no password (for SSH key auth)
-  - Automatically selects the best method
 - **Fixed**: SSH compatibility with older OpenSSH versions (e.g., 8.1p1)
-  - Auto-detects `PubkeyAcceptedAlgorithms` vs `PubkeyAcceptedKeyTypes`
-  - Falls back gracefully when options are not supported
-- **Added**: API endpoint `/api/set_password` for runtime password configuration
 
 ### v1.7 (2024-12-23)
 - **Added**: Auto-detect interface mapping for different hardware units
-  - Automatically detects which athX interface corresponds to which band (2G/5G/6G)
-  - Supports units with different interface configurations (e.g., ath1/ath2 swapped)
-  - Detection via `iwconfig` frequency reading
-  - UCI radio mapping (wifi0/wifi1/wifi2) also auto-detected
 - **Added**: Interface mapping display in Web UI header
-  - Shows current mapping: `2G=ath0 | 5G=ath2 | 6G=ath1`
-  - Status badge: `✓ Auto-detected` or `Default`
-  - Manual re-detect button
 - **Added**: API endpoints for interface mapping
-  - `GET /api/interface_mapping` - Get current mapping
-  - `POST /api/detect_interfaces` - Force re-detection
 - **Fixed**: Channel configuration now works correctly on different hardware units
 
 ### v1.6 (2024-12-23)
 - **Added**: File split feature to prevent oversized capture files during long sessions
-  - Toggle switch in UI to enable/disable file splitting
-  - Configurable file size: 50MB, 100MB, 200MB (default), 500MB, 1GB
-  - Uses tcpdump `-C` option for automatic file rotation
-  - Automatic download of all split files when capture stops
-  - Split files named: `{Band}_sniffer_{timestamp}_part001.pcap`
 - **Added**: API endpoints for file split configuration
-  - `GET /api/file_split` - Get current settings
-  - `POST /api/file_split` - Update settings
 - **Updated**: EXE build includes file split feature
 
 ### v1.5 (2024-12-22)
 - **Added**: Environment variable port configuration (`FLASK_PORT`)
-  - Allows running multiple Flask projects simultaneously
-  - Default port: 5000
-  - Configurable via `start_server.bat` or environment variable
 - **Updated**: All batch files support port configuration
 
 ### v1.4 (2024-12-19)
 - **Added**: Auto-detect current WiFi channel configuration on page load
-  - Channel Configuration dropdowns now show actual OpenWrt settings
-  - No more guessing what channel/bandwidth is currently configured
 - **Added**: Notification when config is loaded from OpenWrt
 
 ### v1.3 (2024-12-19)
 - **Added**: Automatic time synchronization before capture starts
-  - PC time is synced to OpenWrt before each capture session
-  - Ensures pcap timestamps match PC time for accurate log correlation
-- **Added**: Time sync status display in header (PC time vs OpenWrt time)
-- **Added**: Manual time sync button for on-demand synchronization
+- **Added**: Time sync status display in header
+- **Added**: Manual time sync button
 - **Added**: API endpoints: `/api/time_info` and `/api/sync_time`
 
 ### v1.2 (2024-12-19)
 - **Fixed**: Multi-band simultaneous capture now works correctly
-  - Previously, starting one band would kill other bands' tcpdump processes
-  - Now each band's tcpdump is managed independently
-- **Added**: Channel configuration via Web UI (Apply Config & Restart WiFi)
+- **Added**: Channel configuration via Web UI
 - **Added**: UCI command integration for frequency changes
 - **Fixed**: Bandwidth options updated to EHT for 5G/6G bands
 
 ### v1.1 (2024-12-19)
 - Fixed SSH connection for OpenWrt/Dropbear (legacy ssh-rsa support)
-- Changed file download method from SCP to SSH pipe (OpenWrt compatibility)
-- Improved tcpdump background process handling for BusyBox
+- Changed file download method from SCP to SSH pipe
+- Improved tcpdump background process handling
 - Added connection diagnostics feature
 - Added real-time capture status monitoring
 

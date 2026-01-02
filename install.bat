@@ -6,6 +6,7 @@ setlocal EnableDelayedExpansion
 echo.
 echo ============================================================
 echo     WiFi Sniffer Web Control Panel - Installation
+echo     Supports v1 (Classic) and v2 (Performance)
 echo ============================================================
 echo.
 
@@ -18,7 +19,7 @@ if %ERRORLEVEL% NEQ 0 (
 )
 
 REM ========== Check Python ==========
-echo [1/5] Checking Python installation...
+echo [1/6] Checking Python installation...
 where python >nul 2>&1
 if %ERRORLEVEL% NEQ 0 (
     echo [ERROR] Python is NOT installed!
@@ -39,7 +40,7 @@ if %ERRORLEVEL% NEQ 0 (
 
 REM ========== Check pip ==========
 echo.
-echo [2/5] Checking pip installation...
+echo [2/6] Checking pip installation...
 python -m pip --version >nul 2>&1
 if %ERRORLEVEL% NEQ 0 (
     echo [INFO] Installing pip...
@@ -50,28 +51,44 @@ if %ERRORLEVEL% NEQ 0 (
 
 REM ========== Upgrade pip ==========
 echo.
-echo [3/5] Upgrading pip to latest version...
+echo [3/6] Upgrading pip to latest version...
 python -m pip install --upgrade pip --quiet
 
-REM ========== Install Dependencies ==========
+REM ========== Install Core Dependencies ==========
 echo.
-echo [4/5] Installing Python dependencies...
+echo [4/6] Installing core Python dependencies...
 echo      - Flask (Web framework)
 echo      - Paramiko (SSH library)
 echo.
 
 python -m pip install flask paramiko --quiet
 if %ERRORLEVEL% NEQ 0 (
-    echo [ERROR] Failed to install dependencies!
-    echo Please try running: pip install flask paramiko scapy
+    echo [ERROR] Failed to install core dependencies!
+    echo Please try running: pip install flask paramiko
     pause
     exit /b 1
 )
-echo [OK] All dependencies installed successfully
+echo [OK] Core dependencies installed
+
+REM ========== Install v2 Dependencies ==========
+echo.
+echo [5/6] Installing v2 dependencies (WebSocket support)...
+echo      - Flask-SocketIO (Real-time updates)
+echo      - Eventlet (Async support)
+echo.
+
+python -m pip install flask-socketio eventlet --quiet
+if %ERRORLEVEL% NEQ 0 (
+    echo [WARN] Failed to install v2 dependencies.
+    echo [WARN] v1 will work, but v2 requires these packages.
+    echo [INFO] Try manually: pip install flask-socketio eventlet
+) else (
+    echo [OK] v2 dependencies installed
+)
 
 REM ========== Check Wireshark ==========
 echo.
-echo [5/5] Checking Wireshark installation...
+echo [6/6] Checking Wireshark installation...
 where wireshark >nul 2>&1
 if %ERRORLEVEL% NEQ 0 (
     echo [WARN] Wireshark is NOT found in PATH
@@ -92,16 +109,12 @@ echo ============================================================
 echo     SSH Configuration for OpenWrt (192.168.1.1)
 echo ============================================================
 echo.
-echo To ensure SSH connection works, you may need to:
+echo The system uses Windows native SSH which works automatically
+echo with OpenWrt's default configuration (no password).
 echo.
-echo Option 1: Password Authentication
-echo   - Edit wifi_sniffer_web_control.py
-echo   - Set: OPENWRT_PASSWORD = "your_password"
-echo.
-echo Option 2: SSH Key Authentication (Recommended)
-echo   - Generate key: ssh-keygen -t rsa
-echo   - Copy to router: ssh-copy-id root@192.168.1.1
-echo   - Or manually add public key to router
+echo If your OpenWrt requires a password:
+echo   Option 1: Set up SSH key authentication (recommended)
+echo   Option 2: Edit wifi_sniffer/config.py and set OPENWRT_PASSWORD
 echo.
 
 REM ========== Test Connection ==========
@@ -110,7 +123,7 @@ set /p TEST_SSH="Test SSH connection to 192.168.1.1? (Y/N): "
 if /i "%TEST_SSH%"=="Y" (
     echo.
     echo [INFO] Testing SSH connection...
-    ssh -o ConnectTimeout=5 -o StrictHostKeyChecking=no -oHostKeyAlgorithms=+ssh-rsa root@192.168.1.1 "echo 'SSH connection successful!'" 2>nul
+    ssh -o ConnectTimeout=5 -o StrictHostKeyChecking=no -o HostKeyAlgorithms=+ssh-rsa root@192.168.1.1 "echo 'SSH connection successful!'" 2>nul
     if %ERRORLEVEL% NEQ 0 (
         echo [WARN] SSH connection failed. Please check:
         echo        - OpenWrt is powered on
@@ -128,10 +141,20 @@ echo ============================================================
 echo                 Installation Complete!
 echo ============================================================
 echo.
-echo Next steps:
-echo   1. Double-click "start_server.bat" to launch
-echo   2. Browser will open to http://127.0.0.1:5000
-echo   3. Click Start/Stop buttons to capture WiFi packets
+echo Available versions:
+echo.
+echo   v1 (Classic):
+echo      - Run: start_server.bat
+echo      - Or:  python wifi_sniffer_web_control.py
+echo.
+echo   v2 (Performance - Recommended):
+echo      - Run: start_server_v2.bat
+echo      - Or:  python wifi_sniffer_web_control_v2.py
+echo      - Features: SSH pooling, WebSocket, Caching
+echo.
+echo   Standalone EXE (No Python needed):
+echo      - v1: build\dist\WiFi_Sniffer_Control_Panel.exe
+echo      - v2: build\dist\WiFi_Sniffer_Control_Panel_v2.exe
 echo.
 echo Files saved to: %USERPROFILE%\Downloads
 echo.

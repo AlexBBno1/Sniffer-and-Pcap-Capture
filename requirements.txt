@@ -1,5 +1,12 @@
-# WiFi Sniffer Web Control Panel - Dependencies
+# WiFi Sniffer Web Control Panel v2 - Dependencies
 # Install with: pip install -r requirements.txt
 
+# Core dependencies
 flask>=2.3.0
 paramiko>=3.0.0
+
+# WebSocket support for real-time updates
+flask-socketio>=5.3.0
+
+# Async support (optional, improves performance)
+eventlet>=0.33.0

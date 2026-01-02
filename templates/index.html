@@ -1,0 +1,325 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WiFi Sniffer Control Panel</title>
+    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&family=Space+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+<body>
+    <div class="loading-overlay" id="loadingOverlay">
+        <div class="spinner"></div>
+    </div>
+    
+    <div class="container">
+        <header>
+            <h1>📡 WiFi Sniffer Control Panel</h1>
+            <p class="subtitle">OpenWrt Monitor Mode Packet Capture</p>
+            <div class="connection-status" onclick="diagnoseConnection()" style="cursor: pointer;" title="Click to diagnose">
+                <div class="status-dot checking" id="connectionDot"></div>
+                <span id="connectionText">Checking connection...</span>
+            </div>
+            
+            <!-- Interface Mapping Status -->
+            <div class="interface-mapping-status">
+                <span style="color: var(--text-secondary);">🔗 Interface:</span>
+                <span id="mapping2G" style="font-family: 'JetBrains Mono', monospace; color: var(--accent-2g);">2G={{ interfaces['2G'] }}</span>
+                <span style="color: var(--text-secondary);">|</span>
+                <span id="mapping5G" style="font-family: 'JetBrains Mono', monospace; color: var(--accent-5g);">5G={{ interfaces['5G'] }}</span>
+                <span style="color: var(--text-secondary);">|</span>
+                <span id="mapping6G" style="font-family: 'JetBrains Mono', monospace; color: var(--accent-6g);">6G={{ interfaces['6G'] }}</span>
+                <span id="detectionBadge" style="padding: 0.2rem 0.5rem; border-radius: 1rem; font-size: 0.75rem; font-weight: 600; {{ 'background: rgba(34, 197, 94, 0.2); color: var(--accent-2g);' if detection_status.detected else 'background: rgba(148, 163, 184, 0.2); color: var(--text-secondary);' }}">{{ '✓ Auto-detected' if detection_status.detected else 'Default' }}</span>
+                <button onclick="redetectInterfaces()" style="background: none; border: 1px solid var(--border-color); color: var(--text-secondary); padding: 0.25rem 0.5rem; border-radius: 0.25rem; cursor: pointer; font-size: 0.75rem;" title="Re-detect interface mapping">🔍 Detect</button>
+            </div>
+            
+            <!-- Time Sync Status -->
+            <div class="time-sync-status" id="timeSyncStatus">
+                <span style="color: var(--text-secondary);">🕐 PC:</span>
+                <span id="pcTime" style="font-family: 'JetBrains Mono', monospace;">--:--:--</span>
+                <span style="color: var(--text-secondary);">| OpenWrt:</span>
+                <span id="openwrtTime" style="font-family: 'JetBrains Mono', monospace;">--:--:--</span>
+                <span id="timeOffsetBadge" style="padding: 0.2rem 0.5rem; border-radius: 1rem; font-size: 0.75rem; font-weight: 600;">--</span>
+                <button onclick="manualSyncTime()" style="background: none; border: 1px solid var(--border-color); color: var(--text-secondary); padding: 0.25rem 0.5rem; border-radius: 0.25rem; cursor: pointer; font-size: 0.75rem;" title="Sync OpenWrt time with PC">🔄 Sync</button>
+            </div>
+        </header>
+        
+        <!-- File Split Settings -->
+        <div class="file-split-settings">
+            <div style="display: flex; align-items: center; gap: 0.75rem;">
+                <label class="toggle-switch">
+                    <input type="checkbox" id="fileSplitEnabled" onchange="updateFileSplit()">
+                    <span class="toggle-slider"></span>
+                </label>
+                <span style="font-weight: 500;">Split Files by Size</span>
+            </div>
+            <div id="fileSplitSizeContainer" style="display: flex; align-items: center; gap: 0.5rem; opacity: 0.5;">
+                <span style="color: var(--text-secondary);">Max size:</span>
+                <select id="fileSplitSize" onchange="updateFileSplit()" style="padding: 0.4rem 0.75rem; background: var(--bg-dark); border: 1px solid var(--border-color); border-radius: 0.35rem; color: var(--text-primary); font-family: 'JetBrains Mono', monospace;">
+                    <option value="50">50 MB</option>
+                    <option value="100">100 MB</option>
+                    <option value="200" selected>200 MB</option>
+                    <option value="500">500 MB</option>
+                    <option value="1000">1 GB</option>
+                </select>
+                <span style="color: var(--text-secondary); font-size: 0.85rem;">per file</span>
+            </div>
+            <div id="fileSplitStatus" style="font-size: 0.85rem; color: var(--text-secondary); font-family: 'JetBrains Mono', monospace;">
+                📁 Continuous capture (no split)
+            </div>
+        </div>
+        
+        <div class="main-controls">
+            <button class="btn btn-start-all" onclick="startAll()">
+                <svg width="20" height="20" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z"/>
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
+                </svg>
+                Start All Captures
+            </button>
+            <button class="btn btn-stop-all" onclick="stopAll()">
+                <svg width="20" height="20" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 10a1 1 0 011-1h4a1 1 0 011 1v4a1 1 0 01-1 1h-4a1 1 0 01-1-1v-4z"/>
+                </svg>
+                Stop All & Download
+            </button>
+            <button class="btn btn-refresh" onclick="refreshStatus()">
+                <svg width="20" height="20" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/>
+                </svg>
+                Refresh
+            </button>
+            <button class="btn btn-apply-all" onclick="applyAllConfig()">
+                <svg width="20" height="20" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"/>
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/>
+                </svg>
+                Apply Config & Restart WiFi
+            </button>
+        </div>
+        
+        <div class="grid">
+            <!-- 2.4G Card -->
+            <div class="card card-2g">
+                <div class="card-header">
+                    <div class="band-label">
+                        <div class="band-icon band-icon-2g">2.4G</div>
+                        <div class="band-info">
+                            <h3>2.4 GHz Band</h3>
+                            <span class="interface" id="iface-2g">{{ interfaces['2G'] }}</span>
+                        </div>
+                    </div>
+                    <span class="status-badge {{ 'status-running' if status['2G']['running'] else 'status-idle' }}" id="status-2g">
+                        {{ 'CAPTURING' if status['2G']['running'] else 'IDLE' }}
+                    </span>
+                </div>
+                <div class="card-body">
+                    <div class="stats-grid">
+                        <div class="stat-item">
+                            <div class="stat-value" id="duration-2g">{{ status['2G']['duration'] or '--:--' }}</div>
+                            <div class="stat-label">Duration</div>
+                        </div>
+                        <div class="stat-item">
+                            <div class="stat-value" id="packets-2g">{{ status['2G']['packets'] }}</div>
+                            <div class="stat-label">Est. Packets</div>
+                        </div>
+                    </div>
+                    <div class="channel-config">
+                        <label>Channel Configuration</label>
+                        <div class="config-row">
+                            <select id="channel-2g">
+                                {% for ch in channels['2G'] %}
+                                <option value="{{ ch }}" {{ 'selected' if ch == channel_config['2G']['channel'] else '' }}>CH {{ ch }}</option>
+                                {% endfor %}
+                            </select>
+                            <select id="bandwidth-2g">
+                                {% for bw in bandwidths['2G'] %}
+                                <option value="{{ bw }}" {{ 'selected' if bw == channel_config['2G']['bandwidth'] else '' }}>{{ bw }}</option>
+                                {% endfor %}
+                            </select>
+                            <button class="btn-apply-config" onclick="applyConfig('2G')">Apply</button>
+                        </div>
+                    </div>
+                    <div class="card-actions">
+                        <button class="btn-capture btn-start {{ 'btn-disabled' if status['2G']['running'] else '' }}" 
+                                onclick="startCapture('2G')" {{ 'disabled' if status['2G']['running'] else '' }}>
+                            <svg width="16" height="16" fill="currentColor" viewBox="0 0 24 24">
+                                <path d="M8 5v14l11-7z"/>
+                            </svg>
+                            Start
+                        </button>
+                        <button class="btn-capture btn-stop {{ '' if status['2G']['running'] else 'btn-disabled' }}" 
+                                onclick="stopCapture('2G')" {{ '' if status['2G']['running'] else 'disabled' }}>
+                            <svg width="16" height="16" fill="currentColor" viewBox="0 0 24 24">
+                                <rect x="6" y="6" width="12" height="12"/>
+                            </svg>
+                            Stop & Save
+                        </button>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- 5G Card -->
+            <div class="card card-5g">
+                <div class="card-header">
+                    <div class="band-label">
+                        <div class="band-icon band-icon-5g">5G</div>
+                        <div class="band-info">
+                            <h3>5 GHz Band</h3>
+                            <span class="interface" id="iface-5g">{{ interfaces['5G'] }}</span>
+                        </div>
+                    </div>
+                    <span class="status-badge {{ 'status-running' if status['5G']['running'] else 'status-idle' }}" id="status-5g">
+                        {{ 'CAPTURING' if status['5G']['running'] else 'IDLE' }}
+                    </span>
+                </div>
+                <div class="card-body">
+                    <div class="stats-grid">
+                        <div class="stat-item">
+                            <div class="stat-value" id="duration-5g">{{ status['5G']['duration'] or '--:--' }}</div>
+                            <div class="stat-label">Duration</div>
+                        </div>
+                        <div class="stat-item">
+                            <div class="stat-value" id="packets-5g">{{ status['5G']['packets'] }}</div>
+                            <div class="stat-label">Est. Packets</div>
+                        </div>
+                    </div>
+                    <div class="channel-config">
+                        <label>Channel Configuration</label>
+                        <div class="config-row">
+                            <select id="channel-5g">
+                                {% for ch in channels['5G'] %}
+                                <option value="{{ ch }}" {{ 'selected' if ch == channel_config['5G']['channel'] else '' }}>CH {{ ch }}</option>
+                                {% endfor %}
+                            </select>
+                            <select id="bandwidth-5g">
+                                {% for bw in bandwidths['5G'] %}
+                                <option value="{{ bw }}" {{ 'selected' if bw == channel_config['5G']['bandwidth'] else '' }}>{{ bw }}</option>
+                                {% endfor %}
+                            </select>
+                            <button class="btn-apply-config" onclick="applyConfig('5G')">Apply</button>
+                        </div>
+                    </div>
+                    <div class="card-actions">
+                        <button class="btn-capture btn-start {{ 'btn-disabled' if status['5G']['running'] else '' }}" 
+                                onclick="startCapture('5G')" {{ 'disabled' if status['5G']['running'] else '' }}>
+                            <svg width="16" height="16" fill="currentColor" viewBox="0 0 24 24">
+                                <path d="M8 5v14l11-7z"/>
+                            </svg>
+                            Start
+                        </button>
+                        <button class="btn-capture btn-stop {{ '' if status['5G']['running'] else 'btn-disabled' }}" 
+                                onclick="stopCapture('5G')" {{ '' if status['5G']['running'] else 'disabled' }}>
+                            <svg width="16" height="16" fill="currentColor" viewBox="0 0 24 24">
+                                <rect x="6" y="6" width="12" height="12"/>
+                            </svg>
+                            Stop & Save
+                        </button>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- 6G Card -->
+            <div class="card card-6g">
+                <div class="card-header">
+                    <div class="band-label">
+                        <div class="band-icon band-icon-6g">6G</div>
+                        <div class="band-info">
+                            <h3>6 GHz Band</h3>
+                            <span class="interface" id="iface-6g">{{ interfaces['6G'] }}</span>
+                        </div>
+                    </div>
+                    <span class="status-badge {{ 'status-running' if status['6G']['running'] else 'status-idle' }}" id="status-6g">
+                        {{ 'CAPTURING' if status['6G']['running'] else 'IDLE' }}
+                    </span>
+                </div>
+                <div class="card-body">
+                    <div class="stats-grid">
+                        <div class="stat-item">
+                            <div class="stat-value" id="duration-6g">{{ status['6G']['duration'] or '--:--' }}</div>
+                            <div class="stat-label">Duration</div>
+                        </div>
+                        <div class="stat-item">
+                            <div class="stat-value" id="packets-6g">{{ status['6G']['packets'] }}</div>
+                            <div class="stat-label">Est. Packets</div>
+                        </div>
+                    </div>
+                    <div class="channel-config">
+                        <label>Channel Configuration</label>
+                        <div class="config-row">
+                            <select id="channel-6g">
+                                {% for ch in channels['6G'] %}
+                                <option value="{{ ch }}" {{ 'selected' if ch == channel_config['6G']['channel'] else '' }}>CH {{ ch }}</option>
+                                {% endfor %}
+                            </select>
+                            <select id="bandwidth-6g">
+                                {% for bw in bandwidths['6G'] %}
+                                <option value="{{ bw }}" {{ 'selected' if bw == channel_config['6G']['bandwidth'] else '' }}>{{ bw }}</option>
+                                {% endfor %}
+                            </select>
+                            <button class="btn-apply-config" onclick="applyConfig('6G')">Apply</button>
+                        </div>
+                    </div>
+                    <div class="card-actions">
+                        <button class="btn-capture btn-start {{ 'btn-disabled' if status['6G']['running'] else '' }}" 
+                                onclick="startCapture('6G')" {{ 'disabled' if status['6G']['running'] else '' }}>
+                            <svg width="16" height="16" fill="currentColor" viewBox="0 0 24 24">
+                                <path d="M8 5v14l11-7z"/>
+                            </svg>
+                            Start
+                        </button>
+                        <button class="btn-capture btn-stop {{ '' if status['6G']['running'] else 'btn-disabled' }}" 
+                                onclick="stopCapture('6G')" {{ '' if status['6G']['running'] else 'disabled' }}>
+                            <svg width="16" height="16" fill="currentColor" viewBox="0 0 24 24">
+                                <rect x="6" y="6" width="12" height="12"/>
+                            </svg>
+                            Stop & Save
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+        
+        <div class="download-path">
+            📁 Capture files will be saved to: <strong>{{ download_path }}</strong>
+            <div id="splitFileNote" style="font-size: 0.8rem; margin-top: 0.5rem; color: var(--text-secondary); display: none;">
+                💡 When file split is enabled, files will be named: <code style="background: rgba(0,0,0,0.3); padding: 0.2rem 0.4rem; border-radius: 0.25rem;">{BAND}_sniffer_{timestamp}_part001.pcap</code>
+            </div>
+        </div>
+    </div>
+    
+    <div id="notification" class="notification" style="display: none;">
+        <span id="notificationText"></span>
+    </div>
+    
+    <!-- Config Apply Modal -->
+    <div id="configModal" class="modal-overlay" style="display: none;">
+        <div class="modal-content">
+            <h3 style="margin-bottom: 1rem; color: var(--accent-warning);">
+                <svg width="24" height="24" fill="none" stroke="currentColor" viewBox="0 0 24 24" style="vertical-align: middle; margin-right: 0.5rem;">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"/>
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/>
+                </svg>
+                Applying Configuration
+            </h3>
+            <div id="configStatus" style="font-family: 'JetBrains Mono', monospace; font-size: 0.85rem; background: rgba(0,0,0,0.3); padding: 1rem; border-radius: 0.5rem; max-height: 300px; overflow-y: auto;">
+                <div class="config-line">Preparing to apply configuration...</div>
+            </div>
+            <div id="configSpinner" style="text-align: center; margin-top: 1rem;">
+                <div class="spinner" style="margin: 0 auto;"></div>
+                <p style="color: var(--text-secondary); margin-top: 0.5rem;">Please wait, WiFi interfaces restarting...</p>
+            </div>
+            <div id="configComplete" style="display: none; text-align: center; margin-top: 1rem;">
+                <button class="btn btn-start-all" onclick="closeConfigModal()" style="padding: 0.75rem 2rem;">
+                    ✓ Configuration Complete - Start Capture
+                </button>
+            </div>
+        </div>
+    </div>
+    
+    <!-- Socket.IO for WebSocket support -->
+    <script src="https://cdn.socket.io/4.6.0/socket.io.min.js"></script>
+    <script src="{{ url_for('static', filename='js/app.js') }}"></script>
+</body>
+</html>

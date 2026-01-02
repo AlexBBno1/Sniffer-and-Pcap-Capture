@@ -921,14 +921,15 @@ def apply_all_and_restart_wifi():
     
     results["messages"].append("UCI changes committed")
     
-    # Restart wifi (this will take time)
-    print("[WIFI] Restarting wifi interfaces...")
-    results["messages"].append("Restarting wifi interfaces...")
+    # Reload wifi configuration using 'wifi load'
+    # This is the correct command to apply channel changes in OpenWrt
+    print("[WIFI] Executing 'wifi load' to apply changes...")
+    results["messages"].append("Executing 'wifi load' to apply changes...")
     
-    success, stdout, stderr = run_ssh_command("wifi", timeout=60)
+    success, stdout, stderr = run_ssh_command("wifi load", timeout=60)
     if not success:
         results["success"] = False
-        results["messages"].append(f"Wifi restart failed: {stderr}")
+        results["messages"].append(f"Wifi load failed: {stderr}")
         return results
     
     # Wait for interfaces to come back up
