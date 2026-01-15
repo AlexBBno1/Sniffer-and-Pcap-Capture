@@ -19,7 +19,8 @@ import sys
 # Add wifi_sniffer package to path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from wifi_sniffer import create_app, socketio
+from wifi_sniffer import create_app
+import wifi_sniffer  # Import module to access socketio after create_app
 from wifi_sniffer.config import SERVER_HOST, SERVER_PORT, DOWNLOADS_FOLDER, OPENWRT_HOST
 from wifi_sniffer.capture import capture_manager
 
@@ -44,8 +45,11 @@ def main():
     print(f"  Starting web server on http://127.0.0.1:{SERVER_PORT}")
     print("=" * 60)
     
-    # Create Flask app
+    # Create Flask app (this initializes socketio)
     app = create_app()
+    
+    # Access socketio from module after create_app has initialized it
+    socketio = wifi_sniffer.socketio
     
     # Run with SocketIO support
     socketio.run(

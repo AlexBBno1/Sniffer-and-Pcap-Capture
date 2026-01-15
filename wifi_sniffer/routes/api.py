@@ -22,6 +22,7 @@ from ..config import (
     OPENWRT_HOST, OPENWRT_USER, OPENWRT_PASSWORD,
     SSH_KEY_PATH, SSH_PORT, CHANNELS, BANDWIDTHS
 )
+from .. import perform_startup_cleanup, is_startup_cleanup_done
 
 
 @api_bp.route('/status')
@@ -97,6 +98,14 @@ def api_apply_config():
             })
     
     results = capture_manager.apply_all_and_restart_wifi()
+    
+    # Ensure method is set in results (already set by apply methods, but ensure it exists)
+    if 'method' not in results:
+        if results.get('iwconfig_mode'):
+            results['method'] = 'iwconfig (2G/5G only)'
+        else:
+            results['method'] = 'UCI + wifi load (full restart)'
+    
     return jsonify(results)
 
 
@@ -133,10 +142,15 @@ def api_test_connection():
         connected = ssh_pool.test_connection()
         set_cached_connection_status(connected)
         
-        # Auto-detect interfaces if connected and not yet detected
-        if connected and not capture_manager.detection_status["detected"]:
-            capture_manager.detect_interfaces()
-            set_cached_interface_mapping(capture_manager.interfaces)
+        if connected:
+            # Perform startup cleanup on first successful connection
+            if not is_startup_cleanup_done():
+                perform_startup_cleanup()
+            
+            # Auto-detect interfaces if connected and not yet detected
+            if not capture_manager.detection_status["detected"]:
+                capture_manager.detect_interfaces()
+                set_cached_interface_mapping(capture_manager.interfaces)
     
     return jsonify({
         "connected": connected,

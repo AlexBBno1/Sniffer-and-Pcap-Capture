@@ -9,6 +9,8 @@ import threading
 from typing import Any, Optional, Callable
 from datetime import datetime
 
+from .config import CONNECTION_CACHE_TTL, INTERFACE_CACHE_TTL
+
 
 class CacheEntry:
     """Single cache entry with TTL"""
@@ -52,10 +54,10 @@ class StatusCache:
         self._cache: dict[str, CacheEntry] = {}
         self._cache_lock = threading.Lock()
         
-        # Cache TTL settings (in seconds)
+        # Cache TTL settings (in seconds) - using config values
         self._ttl_settings = {
-            'connection_status': 5,      # Connection status cache for 5 seconds
-            'interface_mapping': 300,    # Interface mapping cache for 5 minutes
+            'connection_status': CONNECTION_CACHE_TTL,  # Default 10s (was 5s)
+            'interface_mapping': INTERFACE_CACHE_TTL,   # Default 300s (5 minutes)
             'wifi_config': 60,           # WiFi config cache for 1 minute
             'time_info': 2,              # Time info cache for 2 seconds
         }

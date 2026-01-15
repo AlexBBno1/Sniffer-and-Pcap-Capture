@@ -51,11 +51,15 @@ BANDWIDTHS = {
 }
 
 # ============== Cache Configuration ==============
-CONNECTION_CACHE_TTL = 5  # seconds
+CONNECTION_CACHE_TTL = 10  # seconds (increased from 5 for Win10 performance)
 INTERFACE_CACHE_TTL = 300  # 5 minutes
 STATUS_UPDATE_INTERVAL = 3  # seconds
 
+# ============== Monitor Configuration ==============
+MONITOR_INTERVAL = 5  # seconds between packet count checks (increased from 3 for Win10)
+MONITOR_ERROR_THRESHOLD = 3  # consecutive failures before logging error
+
 # ============== SSH Connection Pool ==============
 SSH_POOL_SIZE = 3
-SSH_CONNECT_TIMEOUT = 10
-SSH_COMMAND_TIMEOUT = 30
+SSH_CONNECT_TIMEOUT = 10  # seconds
+SSH_COMMAND_TIMEOUT = 30  # seconds

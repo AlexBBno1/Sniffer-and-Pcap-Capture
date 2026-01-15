@@ -341,16 +341,49 @@ async function stopAll() {
     try {
         const response = await fetch('/api/stop_all', { method: 'POST' });
         const data = await response.json();
-        let savedFiles = [];
-        for (const [band, result] of Object.entries(data.results)) {
+        let savedBands = [];
+        let noFileBands = [];
+        let errorBands = [];
+        
+        const resultEntries = Object.entries(data.results);
+        
+        // Check if SSH failed for all bands
+        const allSshFailed = resultEntries.every(([band, r]) => 
+            r.message && r.message.includes('SSH error'));
+        
+        if (allSshFailed && resultEntries.length > 0) {
+            showNotification('SSH connection to router failed. Check connection.', 'error');
+            setTimeout(refreshStatus, 500);
+            setLoading(false);
+            return;
+        }
+        
+        for (const [band, result] of resultEntries) {
             if (result.success && result.path) {
-                savedFiles.push(band);
+                savedBands.push(band);
+            } else if (result.message && result.message.includes('No capture file')) {
+                noFileBands.push(band);
+            } else {
+                errorBands.push(band);
             }
         }
-        if (savedFiles.length > 0) {
-            showNotification('Saved captures: ' + savedFiles.join(', '), 'success');
+        
+        if (savedBands.length > 0) {
+            // At least some files downloaded
+            let msg = 'Downloaded: ' + savedBands.join(', ');
+            if (noFileBands.length > 0) {
+                msg += ' | No files: ' + noFileBands.join(', ');
+            }
+            showNotification(msg, 'success');
+        } else if (noFileBands.length === 3) {
+            // All 3 bands checked but no files found
+            showNotification('No capture files on router (captures may not have been started)', 'warning');
+        } else if (noFileBands.length > 0) {
+            showNotification('No capture files found on router', 'warning');
+        } else if (errorBands.length > 0) {
+            showNotification('Download failed for: ' + errorBands.join(', '), 'error');
         } else {
-            showNotification('No active captures to stop', 'error');
+            showNotification('Operation completed', 'info');
         }
         setTimeout(refreshStatus, 500);
     } catch (e) {

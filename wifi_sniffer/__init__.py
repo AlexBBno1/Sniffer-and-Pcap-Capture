@@ -13,6 +13,7 @@ from flask import Flask
 # Global socketio instance (may be None if SocketIO is disabled)
 socketio = None
 _socketio_enabled = False
+_startup_cleanup_done = False
 
 
 def create_app():
@@ -134,9 +135,19 @@ def _register_socketio_events():
     @socketio.on('request_connection')
     def handle_request_connection():
         """Handle connection test request"""
+        global _startup_cleanup_done
+        
         connected = ssh_pool.test_connection()
-        if connected and not capture_manager.detection_status["detected"]:
-            capture_manager.detect_interfaces()
+        if connected:
+            # Perform startup cleanup on first successful connection
+            if not _startup_cleanup_done:
+                print("[STARTUP] First connection - running cleanup...")
+                capture_manager.cleanup_remote_processes()
+                _startup_cleanup_done = True
+            
+            if not capture_manager.detection_status["detected"]:
+                capture_manager.detect_interfaces()
+        
         socketio.emit('connection_update', {
             'connected': connected,
             'interfaces': capture_manager.interfaces,
@@ -175,4 +186,27 @@ def is_socketio_enabled():
     return _socketio_enabled
 
 
-__all__ = ['create_app', 'socketio', 'broadcast_status_update', 'broadcast_connection_update', 'is_socketio_enabled']
+def perform_startup_cleanup():
+    """
+    Perform startup cleanup on first successful connection.
+    This is called from the API route when connection is established.
+    """
+    global _startup_cleanup_done
+    
+    if _startup_cleanup_done:
+        return False  # Already done
+    
+    from .capture import capture_manager
+    success, msg = capture_manager.cleanup_remote_processes()
+    _startup_cleanup_done = True
+    print(f"[STARTUP] Cleanup completed: {msg}")
+    return success
+
+
+def is_startup_cleanup_done():
+    """Check if startup cleanup has been performed"""
+    return _startup_cleanup_done
+
+
+__all__ = ['create_app', 'socketio', 'broadcast_status_update', 'broadcast_connection_update', 
+           'is_socketio_enabled', 'perform_startup_cleanup', 'is_startup_cleanup_done']

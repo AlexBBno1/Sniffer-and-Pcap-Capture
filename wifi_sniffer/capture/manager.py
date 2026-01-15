@@ -10,7 +10,10 @@ import time
 from datetime import datetime
 from typing import Dict, Tuple, Optional, Any
 
-from ..config import DOWNLOADS_FOLDER, DEFAULT_INTERFACES, DEFAULT_UCI_WIFI_MAP
+from ..config import (
+    DOWNLOADS_FOLDER, DEFAULT_INTERFACES, DEFAULT_UCI_WIFI_MAP,
+    MONITOR_INTERVAL, MONITOR_ERROR_THRESHOLD
+)
 from ..ssh import run_ssh_command, download_file_scp
 
 
@@ -80,8 +83,13 @@ class CaptureManager:
             "success": False
         }
         
-        # Last connection error
+        # Last connection error (for main connection status)
         self.last_connection_error = None
+        
+        # Monitor error tracking (separate from main connection)
+        # This prevents transient monitor SSH failures from affecting UI connection status
+        self._monitor_error_count: Dict[str, int] = {"2G": 0, "5G": 0, "6G": 0}
+        self._monitor_last_error: Dict[str, Optional[str]] = {"2G": None, "5G": None, "6G": None}
         
         self._status_lock = threading.Lock()
         self._socketio = None  # Will be set by app factory
@@ -90,6 +98,39 @@ class CaptureManager:
     def set_socketio(self, socketio):
         """Set SocketIO instance for broadcasting updates"""
         self._socketio = socketio
+    
+    def cleanup_remote_processes(self) -> Tuple[bool, str]:
+        """
+        Clean up stale tcpdump processes on OpenWrt.
+        
+        This should be called:
+        - On app startup after connection is established
+        - Before applying WiFi channel configuration
+        
+        Returns:
+            Tuple of (success, message)
+        """
+        try:
+            print("[CLEANUP] Checking for stale tcpdump processes on OpenWrt...")
+            
+            # Kill all tcpdump processes
+            kill_cmd = "killall tcpdump 2>/dev/null; echo 'CLEANUP_DONE'"
+            success, stdout, stderr = run_ssh_command(kill_cmd, timeout=10)
+            
+            if success and "CLEANUP_DONE" in stdout:
+                # Also clean up any stale pcap files in /tmp
+                cleanup_files_cmd = "rm -f /tmp/*.pcap /tmp/*.pcap[0-9]* 2>/dev/null; ls /tmp/*.pcap 2>/dev/null | wc -l"
+                success2, stdout2, stderr2 = run_ssh_command(cleanup_files_cmd, timeout=10)
+                
+                print("[CLEANUP] Stale tcpdump processes killed, temp files cleaned")
+                return True, "Cleanup completed"
+            else:
+                print(f"[CLEANUP] Cleanup command returned: {stdout} {stderr}")
+                return False, f"Cleanup failed: {stderr or stdout}"
+                
+        except Exception as e:
+            print(f"[CLEANUP] Error during cleanup: {e}")
+            return False, f"Cleanup error: {str(e)}"
     
     def _broadcast_status_update(self):
         """Broadcast capture status update to all connected clients"""
@@ -394,24 +435,49 @@ class CaptureManager:
             return False, f"Error starting capture: {str(e)}"
     
     def _monitor_capture(self, band: str):
-        """Monitor packet count for a capture"""
+        """
+        Monitor packet count for a capture.
+        
+        Uses error counting to handle transient SSH failures gracefully.
+        Only logs errors after MONITOR_ERROR_THRESHOLD consecutive failures.
+        Does NOT affect the main connection status indicator.
+        """
         while self._status[band]["running"]:
             try:
                 remote_path = f"/tmp/{band}.pcap"
                 success, stdout, stderr = run_ssh_command(
                     f"ls -la {remote_path} 2>/dev/null | awk '{{print $5}}'",
-                    timeout=5
+                    timeout=8  # Slightly longer timeout for reliability
                 )
                 if success and stdout.strip():
                     try:
                         size = int(stdout.strip())
                         with self._status_lock:
                             self._status[band]["packets"] = size // 100
-                    except:
-                        pass
-            except:
-                pass
-            time.sleep(3)
+                        # Reset error count on success
+                        self._monitor_error_count[band] = 0
+                        self._monitor_last_error[band] = None
+                    except ValueError:
+                        pass  # Ignore parse errors, keep trying
+                else:
+                    # SSH command failed - increment error count
+                    self._monitor_error_count[band] += 1
+                    self._monitor_last_error[band] = stderr or "SSH command failed"
+                    
+                    # Only log after threshold consecutive failures
+                    if self._monitor_error_count[band] == MONITOR_ERROR_THRESHOLD:
+                        print(f"[MONITOR] {band}: SSH errors ({MONITOR_ERROR_THRESHOLD}x), "
+                              f"capture may still be running on OpenWrt")
+            except Exception as e:
+                # Exception during SSH - increment error count
+                self._monitor_error_count[band] += 1
+                self._monitor_last_error[band] = str(e)
+                
+                if self._monitor_error_count[band] == MONITOR_ERROR_THRESHOLD:
+                    print(f"[MONITOR] {band}: Monitor exception ({MONITOR_ERROR_THRESHOLD}x): {e}")
+            
+            # Use configurable interval (default 5s, was 3s)
+            time.sleep(MONITOR_INTERVAL)
     
     def stop_capture(self, band: str) -> Tuple[bool, str, Optional[str]]:
         """Stop packet capture and download file(s)"""
@@ -421,49 +487,80 @@ class CaptureManager:
         
         try:
             interface = self.interfaces.get(band)
+            if not interface:
+                return False, f"No interface configured for {band}", None
+            
+            print(f"[STOP {band}] Stopping tcpdump on {interface}...")
             kill_cmd = f"PID=$(ps | grep 'tcpdump -i {interface}' | grep -v grep | awk '{{print $1}}'); [ -n \"$PID\" ] && kill $PID 2>/dev/null || true"
-            run_ssh_command(kill_cmd, timeout=10)
+            success, stdout, stderr = run_ssh_command(kill_cmd, timeout=10)
+            if not success:
+                print(f"[STOP {band}] Warning: kill command returned error: {stderr}")
+            
             time.sleep(2)
             
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             remote_path = f"/tmp/{band}.pcap"
             
+            print(f"[STOP {band}] Checking for capture files at {remote_path}*...")
             success, stdout, stderr = run_ssh_command(f"ls -1 {remote_path}* 2>/dev/null", timeout=5)
             
-            if not success or not stdout.strip():
+            if not success:
+                print(f"[STOP {band}] SSH error checking files: {stderr}")
+                with self._status_lock:
+                    self._status[band]["running"] = False
+                    self._status[band]["start_time"] = None
+                return False, f"SSH error: {stderr or 'Connection failed'}", None
+            
+            if not stdout.strip():
+                print(f"[STOP {band}] No capture files found")
                 with self._status_lock:
                     self._status[band]["running"] = False
                     self._status[band]["start_time"] = None
                 return False, "No capture file found on router", None
             
             remote_files = [f.strip() for f in stdout.strip().split('\n') if f.strip()]
-            print(f"[CAPTURE] Found {len(remote_files)} capture file(s) for {band}")
+            print(f"[STOP {band}] Found {len(remote_files)} capture file(s): {remote_files}")
             
             downloaded_files = []
+            failed_downloads = []
             total_size = 0
             
             if len(remote_files) == 1:
                 local_filename = f"{band}_sniffer_{timestamp}.pcap"
                 local_path = os.path.join(DOWNLOADS_FOLDER, local_filename)
                 
+                print(f"[STOP {band}] Downloading {remote_files[0]} to {local_path}...")
                 if download_file_scp(remote_files[0], local_path):
                     if os.path.exists(local_path):
                         file_size = os.path.getsize(local_path)
                         total_size = file_size
                         downloaded_files.append(local_filename)
+                        print(f"[STOP {band}] Download successful: {file_size:,} bytes")
+                    else:
+                        failed_downloads.append(remote_files[0])
+                        print(f"[STOP {band}] Download failed: file not created")
+                else:
+                    failed_downloads.append(remote_files[0])
+                    print(f"[STOP {band}] Download failed: SCP error")
             else:
                 for i, remote_file in enumerate(remote_files):
                     part_num = i + 1
                     local_filename = f"{band}_sniffer_{timestamp}_part{part_num:03d}.pcap"
                     local_path = os.path.join(DOWNLOADS_FOLDER, local_filename)
                     
+                    print(f"[STOP {band}] Downloading part {part_num}: {remote_file}...")
                     if download_file_scp(remote_file, local_path):
                         if os.path.exists(local_path):
                             file_size = os.path.getsize(local_path)
                             total_size += file_size
                             downloaded_files.append(local_filename)
+                        else:
+                            failed_downloads.append(remote_file)
+                    else:
+                        failed_downloads.append(remote_file)
             
             # Remove remote files
+            print(f"[STOP {band}] Cleaning up remote files...")
             run_ssh_command(f"rm -f {remote_path}*", timeout=5)
             
             with self._status_lock:
@@ -475,7 +572,10 @@ class CaptureManager:
             
             if downloaded_files:
                 if len(downloaded_files) == 1:
-                    return True, f"Saved: {downloaded_files[0]} ({total_size:,} bytes)", os.path.join(DOWNLOADS_FOLDER, downloaded_files[0])
+                    msg = f"Saved: {downloaded_files[0]} ({total_size:,} bytes)"
+                    if failed_downloads:
+                        msg += f" (Warning: {len(failed_downloads)} file(s) failed)"
+                    return True, msg, os.path.join(DOWNLOADS_FOLDER, downloaded_files[0])
                 else:
                     if total_size > 1024 * 1024 * 1024:
                         size_str = f"{total_size / (1024*1024*1024):.2f} GB"
@@ -483,9 +583,15 @@ class CaptureManager:
                         size_str = f"{total_size / (1024*1024):.1f} MB"
                     else:
                         size_str = f"{total_size:,} bytes"
-                    return True, f"Saved {len(downloaded_files)} files ({size_str} total)", DOWNLOADS_FOLDER
+                    msg = f"Saved {len(downloaded_files)} files ({size_str} total)"
+                    if failed_downloads:
+                        msg += f" (Warning: {len(failed_downloads)} file(s) failed)"
+                    return True, msg, DOWNLOADS_FOLDER
             else:
-                return False, "Download failed", None
+                error_msg = "Download failed"
+                if failed_downloads:
+                    error_msg += f": Could not download {len(failed_downloads)} file(s)"
+                return False, error_msg, None
         
         except Exception as e:
             with self._status_lock:
@@ -494,12 +600,150 @@ class CaptureManager:
             return False, f"Error stopping capture: {str(e)}", None
     
     def stop_all_captures(self) -> Dict[str, Dict[str, Any]]:
-        """Stop all running captures"""
+        """
+        Stop all running captures and download pcap files.
+        
+        Always tries to:
+        1. Kill all tcpdump processes on OpenWrt
+        2. Download any pcap files found for ALL bands
+        
+        This works even if local state is out of sync.
+        Always returns results for all 3 bands.
+        """
         results = {}
+        any_files_found = False
+        
+        print("[STOP ALL] Starting stop all captures...")
+        
+        # Step 1: Always try to kill all tcpdump processes on OpenWrt first
+        print("[STOP ALL] Killing all tcpdump processes on OpenWrt...")
+        kill_success, kill_stdout, kill_stderr = run_ssh_command(
+            "killall tcpdump 2>/dev/null; echo KILL_DONE",
+            timeout=15
+        )
+        
+        if not kill_success or "KILL_DONE" not in kill_stdout:
+            print(f"[STOP ALL] SSH connection failed: {kill_stderr}")
+            # SSH failed - return error for all bands
+            for band in ["2G", "5G", "6G"]:
+                results[band] = {
+                    "success": False,
+                    "message": f"SSH error: {kill_stderr or 'Cannot connect to router'}",
+                    "path": None
+                }
+            return results
+        
+        print("[STOP ALL] tcpdump processes killed, waiting...")
+        time.sleep(2)
+        
+        # Step 2: Check for and download pcap files for ALL bands
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        
         for band in ["2G", "5G", "6G"]:
-            if self._status[band]["running"]:
-                success, msg, path = self.stop_capture(band)
-                results[band] = {"success": success, "message": msg, "path": path}
+            remote_path = f"/tmp/{band}.pcap"
+            was_running = self._status[band]["running"]
+            print(f"[STOP ALL] Checking for {band} pcap files (was_running={was_running})...")
+            
+            # Check if pcap files exist
+            check_success, check_stdout, check_stderr = run_ssh_command(
+                f"ls -1 {remote_path}* 2>/dev/null",
+                timeout=10
+            )
+            
+            if not check_success:
+                print(f"[STOP ALL] {band}: SSH error checking files")
+                results[band] = {
+                    "success": False,
+                    "message": "SSH error checking files",
+                    "path": None
+                }
+                # Update local status
+                with self._status_lock:
+                    self._status[band]["running"] = False
+                    self._status[band]["start_time"] = None
+                continue
+            
+            if not check_stdout.strip():
+                print(f"[STOP ALL] {band}: No pcap files found on router")
+                # Always add result - show what we found
+                results[band] = {
+                    "success": False,
+                    "message": "No capture file on router",
+                    "path": None
+                }
+                # Update local status
+                with self._status_lock:
+                    self._status[band]["running"] = False
+                    self._status[band]["start_time"] = None
+                continue
+            
+            # Found pcap files - download them
+            any_files_found = True
+            remote_files = [f.strip() for f in check_stdout.strip().split('\n') if f.strip()]
+            print(f"[STOP ALL] {band}: Found {len(remote_files)} file(s)")
+            
+            downloaded_files = []
+            total_size = 0
+            
+            for i, remote_file in enumerate(remote_files):
+                if len(remote_files) == 1:
+                    local_filename = f"{band}_sniffer_{timestamp}.pcap"
+                else:
+                    local_filename = f"{band}_sniffer_{timestamp}_part{i+1:03d}.pcap"
+                
+                local_path = os.path.join(DOWNLOADS_FOLDER, local_filename)
+                print(f"[STOP ALL] {band}: Downloading {remote_file}...")
+                
+                if download_file_scp(remote_file, local_path):
+                    if os.path.exists(local_path):
+                        file_size = os.path.getsize(local_path)
+                        total_size += file_size
+                        downloaded_files.append(local_filename)
+                        print(f"[STOP ALL] {band}: Downloaded {file_size:,} bytes")
+            
+            # Clean up remote files
+            run_ssh_command(f"rm -f {remote_path}*", timeout=5)
+            
+            # Update local status
+            with self._status_lock:
+                self._status[band]["running"] = False
+                self._status[band]["start_time"] = None
+            
+            # Set result
+            if downloaded_files:
+                if total_size > 1024 * 1024:
+                    size_str = f"{total_size / (1024*1024):.1f} MB"
+                else:
+                    size_str = f"{total_size:,} bytes"
+                
+                if len(downloaded_files) == 1:
+                    results[band] = {
+                        "success": True,
+                        "message": f"Saved: {downloaded_files[0]} ({size_str})",
+                        "path": os.path.join(DOWNLOADS_FOLDER, downloaded_files[0])
+                    }
+                else:
+                    results[band] = {
+                        "success": True,
+                        "message": f"Saved {len(downloaded_files)} files ({size_str})",
+                        "path": DOWNLOADS_FOLDER
+                    }
+            else:
+                results[band] = {
+                    "success": False,
+                    "message": "Download failed",
+                    "path": None
+                }
+        
+        # Broadcast status update
+        self._broadcast_status_update()
+        
+        # Log summary
+        if any_files_found:
+            print(f"[STOP ALL] Completed with downloads. Results: {results}")
+        else:
+            print(f"[STOP ALL] No pcap files found on router. Results: {results}")
+        
         return results
     
     def set_channel_config(self, band: str, channel: int, bandwidth: str = None) -> Tuple[bool, str]:
@@ -532,9 +776,46 @@ class CaptureManager:
         return True, f"{band} config set: CH{channel} {bandwidth}"
     
     def apply_all_and_restart_wifi(self) -> Dict[str, Any]:
-        """Apply all channel configurations and restart wifi"""
-        results = {"success": True, "messages": [], "bands": {}}
+        """
+        Apply all channel configurations and restart wifi.
         
+        Automatically chooses the best method:
+        - If 6G channel is unchanged: Use iwconfig for 2G/5G (fast, no restart)
+        - If 6G channel is changed: Use UCI + wifi load (full restart)
+        
+        Uses a robust restart sequence:
+        1. Kill any running tcpdump processes first
+        2. Apply UCI changes
+        3. Use 'wifi down; sleep 2; wifi up' for reliable restart
+        4. Poll for interfaces to come up
+        """
+        # Step 1: Check if 6G channel has changed
+        current_6g_channel = self._get_current_6g_channel()
+        target_6g_channel = self.channel_config["6G"]["channel"]
+        six_g_changed = (current_6g_channel is None or 
+                        current_6g_channel != target_6g_channel)
+        
+        print(f"[WIFI] 6G channel check: current={current_6g_channel}, target={target_6g_channel}, changed={six_g_changed}")
+        
+        # Step 2: If 6G has not changed, use iwconfig for 2G/5G only
+        if not six_g_changed:
+            print("[WIFI] 6G unchanged, using iwconfig for 2G/5G...")
+            return self.apply_2g_5g_with_iwconfig()
+        
+        # Step 3: 6G has changed, use full UCI + wifi load process
+        print("[WIFI] 6G changed, using full UCI + wifi load process...")
+        results = {"success": True, "messages": [], "bands": {}, "method": "UCI + wifi load (full restart)"}
+        
+        # Step 1: Clean up any running tcpdump processes first
+        results["messages"].append("Cleaning up running processes...")
+        print("[WIFI] Cleaning up tcpdump processes before restart...")
+        cleanup_success, cleanup_msg = self.cleanup_remote_processes()
+        if cleanup_success:
+            results["messages"].append("Cleanup completed")
+        else:
+            results["messages"].append(f"Cleanup warning: {cleanup_msg}")
+        
+        # Step 2: Apply channel configuration for each band
         for band in ["2G", "5G", "6G"]:
             success, msg = self.apply_channel_config(band)
             results["bands"][band] = {"success": success, "message": msg}
@@ -545,7 +826,7 @@ class CaptureManager:
         if not results["success"]:
             return results
         
-        # Commit UCI changes
+        # Step 3: Commit UCI changes
         success, stdout, stderr = run_ssh_command("uci commit wireless", timeout=10)
         if not success:
             results["success"] = False
@@ -554,32 +835,33 @@ class CaptureManager:
         
         results["messages"].append("UCI changes committed")
         
-        # Reload wifi configuration using 'wifi load'
-        # This is the correct command to apply channel changes in OpenWrt
-        results["messages"].append("Executing 'wifi load' to apply changes...")
-        print("[WIFI] Executing 'wifi load'...")
+        # Step 4: Use robust wifi restart sequence (wifi down; wifi up)
+        # This is more reliable than 'wifi load' for channel changes
+        results["messages"].append("Restarting WiFi interfaces (wifi down; wifi up)...")
+        print("[WIFI] Executing 'wifi down; wifi up'...")
         
-        success, stdout, stderr = run_ssh_command("wifi load", timeout=60)
+        # Execute wifi down and wifi up in a single command
+        success, stdout, stderr = run_ssh_command("wifi down; sleep 2; wifi up", timeout=90)
         if not success:
-            # Try alternative: run in background if timeout
-            results["messages"].append("Trying 'wifi load' in background...")
-            restart_cmd = "nohup wifi load > /dev/null 2>&1 &"
+            # Try running in background if timeout
+            results["messages"].append("Trying wifi restart in background...")
+            restart_cmd = "nohup sh -c 'wifi down; sleep 2; wifi up' > /dev/null 2>&1 &"
             success, stdout, stderr = run_ssh_command(restart_cmd, timeout=10)
             if not success:
-                results["success"] = False
-                results["messages"].append(f"Wifi load failed: {stderr}")
-                return results
+                # Last resort: try 'wifi' command
+                results["messages"].append("Trying 'wifi' command...")
+                success, stdout, stderr = run_ssh_command("wifi", timeout=60)
         
         results["messages"].append("Wifi restart initiated, waiting for interfaces...")
         
-        # Poll for interfaces to be ready (increased wait time)
-        max_wait = 90  # Increased from 30 to 90 seconds
+        # Step 5: Poll for interfaces to be ready
+        max_wait = 90  # Maximum wait time in seconds
         start_time = time.time()
         interfaces_ready = False
         last_check = ""
         
         while time.time() - start_time < max_wait:
-            time.sleep(5)  # Check every 5 seconds
+            time.sleep(3)  # Check every 3 seconds (more frequent)
             elapsed = int(time.time() - start_time)
             
             success, stdout, stderr = run_ssh_command("iwconfig 2>/dev/null | grep -E '^ath[0-2]'", timeout=10)
@@ -602,8 +884,8 @@ class CaptureManager:
                     interfaces_ready = True
                     break
             
-            # Progress update
-            if elapsed % 15 == 0:
+            # Progress update every 15 seconds
+            if elapsed % 15 == 0 and elapsed > 0:
                 print(f"[WIFI] Waiting... {elapsed}s / {max_wait}s")
         
         if interfaces_ready:
@@ -619,7 +901,7 @@ class CaptureManager:
             self.detect_interfaces()
         else:
             results["success"] = False
-            results["messages"].append(f"Timeout waiting for interfaces ({max_wait}s)")
+            results["messages"].append(f"Timeout waiting for interfaces ({max_wait}s). Try rebooting the router.")
         
         return results
     
@@ -660,6 +942,171 @@ class CaptureManager:
     def get_channel_config(self) -> Dict[str, Dict[str, Any]]:
         """Get the current local channel configuration (without querying OpenWrt)"""
         return dict(self.channel_config)
+    
+    def get_current_channel_from_iwconfig(self, interface: str) -> Optional[int]:
+        """
+        從 iwconfig 讀取當前頻道
+        
+        Args:
+            interface: 介面名稱 (如 ath0, ath1, ath2)
+            
+        Returns:
+            頻道號碼或 None
+        """
+        try:
+            success, stdout, stderr = run_ssh_command(
+                f"iwconfig {interface} 2>/dev/null | grep -oP 'Channel:\\K\\d+'",
+                timeout=10
+            )
+            
+            if success and stdout.strip():
+                try:
+                    channel = int(stdout.strip())
+                    return channel
+                except ValueError:
+                    pass
+            
+            # Fallback: 嘗試解析完整 iwconfig 輸出
+            success, stdout, stderr = run_ssh_command(
+                f"iwconfig {interface} 2>/dev/null",
+                timeout=10
+            )
+            
+            if success and stdout.strip():
+                # 尋找 "Channel:XX" 或 "Channel XX" 格式
+                import re
+                patterns = [
+                    r'Channel[:\s]+(\d+)',
+                    r'channel[:\s]+(\d+)',
+                ]
+                for pattern in patterns:
+                    match = re.search(pattern, stdout, re.IGNORECASE)
+                    if match:
+                        try:
+                            return int(match.group(1))
+                        except ValueError:
+                            pass
+            
+            return None
+        except Exception as e:
+            print(f"[IWCONFIG] Error reading channel for {interface}: {e}")
+            return None
+    
+    def _get_current_6g_channel(self) -> Optional[int]:
+        """讀取 OpenWrt 上 6G 的當前頻道（從 UCI）"""
+        try:
+            uci_radio = self.uci_wifi_map.get("6G")
+            if not uci_radio:
+                return None
+            
+            success, stdout, stderr = run_ssh_command(
+                f"uci get wireless.{uci_radio}.channel 2>/dev/null",
+                timeout=10
+            )
+            
+            if success and stdout.strip():
+                try:
+                    channel = int(stdout.strip())
+                    return channel if channel > 0 else None
+                except ValueError:
+                    pass
+            
+            return None
+        except Exception as e:
+            print(f"[UCI] Error reading 6G channel: {e}")
+            return None
+    
+    def apply_2g_5g_with_iwconfig(self) -> Dict[str, Any]:
+        """
+        使用 iwconfig 直接設定 2G 和 5G 頻道（無需重啟 WiFi）
+        
+        Returns:
+            包含成功狀態和訊息的字典
+        """
+        results = {
+            "success": True,
+            "messages": [],
+            "bands": {},
+            "iwconfig_mode": True,
+            "method": "iwconfig (2G/5G only)"
+        }
+        
+        # Step 1: Clean up any running tcpdump processes first
+        results["messages"].append("Cleaning up running processes...")
+        print("[IWCONFIG] Cleaning up tcpdump processes...")
+        cleanup_success, cleanup_msg = self.cleanup_remote_processes()
+        if cleanup_success:
+            results["messages"].append("Cleanup completed")
+        else:
+            results["messages"].append(f"Cleanup warning: {cleanup_msg}")
+        
+        # Step 2: Apply iwconfig for 2G and 5G
+        for band in ["2G", "5G"]:
+            interface = self.interfaces.get(band)
+            if not interface:
+                results["bands"][band] = {
+                    "success": False,
+                    "message": f"No interface configured for {band}"
+                }
+                results["messages"].append(f"{band}: No interface configured")
+                results["success"] = False
+                continue
+            
+            target_channel = self.channel_config[band]["channel"]
+            results["messages"].append(f"{band}: Setting channel {target_channel} on {interface}...")
+            print(f"[IWCONFIG] {band}: Setting {interface} to channel {target_channel}")
+            
+            # Execute iwconfig command
+            iwconfig_cmd = f"iwconfig {interface} Channel {target_channel}"
+            success, stdout, stderr = run_ssh_command(iwconfig_cmd, timeout=10)
+            
+            if not success:
+                results["bands"][band] = {
+                    "success": False,
+                    "message": f"Failed to set channel: {stderr or stdout}"
+                }
+                results["messages"].append(f"{band}: Failed - {stderr or stdout}")
+                results["success"] = False
+                continue
+            
+            # Wait for setting to take effect
+            time.sleep(2)
+            
+            # Step 3: Verify channel was set correctly
+            actual_channel = self.get_current_channel_from_iwconfig(interface)
+            if actual_channel == target_channel:
+                results["bands"][band] = {
+                    "success": True,
+                    "message": f"Channel set to {target_channel} (verified)"
+                }
+                results["messages"].append(f"{band}: ✓ Channel {target_channel} set successfully")
+                print(f"[IWCONFIG] {band}: Verified channel {target_channel} on {interface}")
+            else:
+                results["bands"][band] = {
+                    "success": False,
+                    "message": f"Channel verification failed: expected {target_channel}, got {actual_channel}"
+                }
+                results["messages"].append(
+                    f"{band}: ✗ Verification failed (expected {target_channel}, got {actual_channel})"
+                )
+                results["success"] = False
+                print(f"[IWCONFIG] {band}: Verification failed - expected {target_channel}, got {actual_channel}")
+        
+        # Step 4: Get interface status for display
+        success, stdout, stderr = run_ssh_command(
+            "iwconfig 2>/dev/null | grep -E '^ath[0-2]|Channel|Frequency'",
+            timeout=10
+        )
+        if success and stdout.strip():
+            results["interface_status"] = stdout
+            results["messages"].append("Interface status updated")
+        
+        if results["success"]:
+            results["messages"].append("✓ 2G/5G channel configuration completed (iwconfig mode)")
+        else:
+            results["messages"].append("✗ Some channel configurations failed")
+        
+        return results
 
 
 # Global singleton instance

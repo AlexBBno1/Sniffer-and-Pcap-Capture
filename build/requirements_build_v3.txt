@@ -1,0 +1,18 @@
+# Build Dependencies for WiFi Sniffer Control Panel v3
+# Install with: pip install -r requirements_build_v3.txt
+
+# Core application dependencies
+flask>=2.3.0
+paramiko>=3.0.0
+
+# WebSocket support
+flask-socketio>=5.3.0
+eventlet>=0.33.0
+dnspython>=2.3.0
+
+# System tray support
+pystray>=0.19.0
+pillow>=10.0.0
+
+# Build tools
+pyinstaller>=6.0.0
